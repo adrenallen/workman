@@ -67,6 +67,14 @@ pub struct ScratchpadFindQuery {
     pub context_lines: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ScratchpadMetadataUpdate {
+    pub name: Option<String>,
+    pub add_tags: Vec<String>,
+    pub remove_tags: Vec<String>,
+    pub archived: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScratchpadSummary {
     pub id: ScratchpadId,
@@ -710,6 +718,37 @@ impl<'store> ScratchpadService<'store> {
         self.require_comment(project_id, comment_id)
     }
 
+    /// Update comment text and resolution together after validating both permissions.
+    pub fn comment_update_merged(
+        &self,
+        project_id: ProjectId,
+        comment_id: ScratchpadCommentId,
+        body: Option<String>,
+        resolved: Option<bool>,
+        now_ms: i64,
+    ) -> ScratchpadServiceResult<ScratchpadCommentView> {
+        if let Some(body) = &body {
+            validate_comment_body(body)?;
+        }
+        let (comment, _) = self.require_comment_record(project_id, comment_id)?;
+        if body.is_some() {
+            self.require_comment_author(&comment, "edited")?;
+        }
+        if resolved.is_some() && !self.can_resolve_comment(&comment) {
+            return Err(ScratchpadServiceError::CommentPermissionDenied {
+                comment_id,
+                action: "resolved or reopened",
+            });
+        }
+        self.store.connection().execute(
+            "UPDATE scratchpad_comments
+             SET body = COALESCE(?1, body), resolved = COALESCE(?2, resolved), updated_at = ?3
+             WHERE id = ?4",
+            params![body, resolved, now_ms, comment_id],
+        )?;
+        self.require_comment(project_id, comment_id)
+    }
+
     pub fn comment_delete(
         &self,
         project_id: ProjectId,
@@ -1161,6 +1200,43 @@ impl<'store> ScratchpadService<'store> {
         let name = normalize_heading_text(&name);
         self.ensure_name_available(project_id, &name, Some(scratchpad_id))?;
         scratchpad.name = name;
+        let revision = scratchpad.revision;
+        self.persist_update(scratchpad, revision)
+    }
+
+    /// Apply consolidated name, tag, and archive changes in one revision-guarded write.
+    pub fn update_metadata(
+        &self,
+        project_id: ProjectId,
+        scratchpad_id: ScratchpadId,
+        update: ScratchpadMetadataUpdate,
+        expected_revision: Option<i64>,
+    ) -> ScratchpadServiceResult<Scratchpad> {
+        if update.name.is_some() && expected_revision.is_none() {
+            return Err(ScratchpadServiceError::InvalidInput(
+                "expected_revision is required when renaming a scratchpad".into(),
+            ));
+        }
+        let name = update
+            .name
+            .map(|name| -> ScratchpadServiceResult<String> {
+                validate_name(&name)?;
+                Ok(normalize_heading_text(&name))
+            })
+            .transpose()?;
+        let additions = normalize_tags(update.add_tags)?;
+        let removals = normalize_tags(update.remove_tags)?;
+        let mut scratchpad = self.require_revision(project_id, scratchpad_id, expected_revision)?;
+        if let Some(name) = name {
+            self.ensure_name_available(project_id, &name, Some(scratchpad_id))?;
+            scratchpad.name = name;
+        }
+        scratchpad.tags.extend(additions);
+        scratchpad.tags = normalize_tags(scratchpad.tags)?;
+        scratchpad.tags.retain(|tag| !removals.contains(tag));
+        if let Some(archived) = update.archived {
+            scratchpad.archived = archived;
+        }
         let revision = scratchpad.revision;
         self.persist_update(scratchpad, revision)
     }

@@ -48,7 +48,7 @@ mod tools_worktree;
 pub const WORKMAN_MCP_TOKEN_HEADER: &str = "x-workman-mcp-token";
 pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. Review feedback with scratchpad_read(include_comments=true), and use scratchpad_comment_create for anchored or whole-document discussion. Agents may update, resolve, reopen, or delete only comments they authored; the human may resolve any project comment. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
 pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then use todo_update(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_update(assignee=\"none\") to unassign.";
-pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Template summaries include launch settings. Use a template only when the user names a template or explicitly asks for one. The template supplies its tool, launch args, prompt, and MCP tools profile; a per-spawn mcp_tools_profile overrides the stored choice. A plain launch uses the agent tool's profile. The resolved profile is fixed for the child agent's lifetime. A tool override carries the template model only for the same agent type; compatible Claude/Codex effort may carry, and command defaults never carry. A selected model arg supersedes the registered command model; an explicit caller model also replaces template and caller model flags. resolved reports effective settings and skipped template args. Set notify_spawner_on_idle=true for a coalesced completion turn; update_process can toggle an existing direct child. Delivery never merges into the human's unsent draft.";
+pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Use a template only when the user names a template or explicitly asks for one. Template: set agent_template_id only; the template supplies its agent tool, model, effort, launch args and prompt, and initial_prompt is appended. Pass model or agent_tool_id only to override. An override keeps the template's model only for the same agent type; compatible Claude/Codex effort may carry, and command defaults never carry. A template launch uses its MCP tools profile, a plain launch uses the agent tool's profile, and a per-spawn mcp_tools_profile overrides either choice. The resolved profile is fixed for the child agent's lifetime. A selected model supersedes the registered command model; an explicit caller model also replaces template and caller model flags. resolved reports effective settings, skipped template args, MCP profile, and whether Workman MCP is wired. Set notify_spawner_on_idle=true for a coalesced completion turn; update_process can toggle an existing direct child. Delivery never merges into the human's unsent draft.";
 pub(crate) const IDLE_TIMER_WAIT_GUIDANCE: &str = "For a child spawned with notify_spawner_on_idle=true, no timer is needed for ordinary completion wake-up. The opt-in is prospective and survives child exit, crash, and restart. Keep a delay timer when a hung-child deadline matters. For other waits, call timer_fire_when_idle once with wait_for=\"any\" or wait_for=\"all\". any may deliver immediately for a newly reported completion; all counts processes already idle at arm time. Arm results expose already_idle and satisfied_by diagnostics. deadline means the timeout fired without reporting completion. When already_satisfied=false and the timer delivers to this agent, finish the response and end the turn; do not poll timer_list or process status. When the fresh turn arrives, inspect watched processes because the deadline may have fired or an agent may be waiting on its own timer.";
 const SERVER_INSTRUCTIONS: &str = "Need human input or found out-of-scope work? Create a todo or comment, then use todo_update(assignee=\"user\") or mention @user in a new todo comment; either notifies the human. Call whoami first. Process credentials jail agents to their owning project; cross-project IDs and indirect targets are rejected. User bearer sessions see the full tool surface but cannot claim a process identity or perform project-scoped work. Use help for todos, scratchpads, worktrees, timers, tools, and spawning.";
 const CORE_TOOL_NAMES: &[&str] = &[
@@ -107,7 +107,7 @@ const EXTENDED_TOOL_NAMES: &[&str] = &[
     "project_update",
     "agent_tool_check",
 ];
-const TOOLS_HELP: &str = "MCP tool profiles are fixed when an agent launches and do not change during that agent's lifetime. A template launch uses the template setting, a human-started agent without a template uses the selected agent tool's setting, a per-spawn override wins, and the fallback is Core. Core includes: whoami, help; todo_create, todo_get, todo_list, todo_update, todo_complete, todo_lock, todo_unlock, todo_delete, todo_comment_create; scratchpad_write, scratchpad_read, scratchpad_list, scratchpad_append, scratchpad_edit, scratchpad_find, scratchpad_update, scratchpad_comment_create, scratchpad_comment_update; list_processes, get_process_status, get_process_output, search_output, send_input, process_control, close_process; list_agent_tools, spawn_agent; timer_fire_when_idle, timer_set, timer_list, timer_cancel. Extended adds: todo_comment_update, todo_comment_delete; scratchpad_delete, scratchpad_comment_delete, scratchpad_save_to_file, scratchpad_load_from_file; update_process, spawn_terminal, clear_output, commands_control, services_list, wait_for_bound_port; timer_pause, lock; worktree_list, worktree_health, worktree_env_forget, project_update, agent_tool_check. A user bearer session sees the full user surface, including agent_tool_configure.";
+const TOOLS_HELP_INTRO: &str = "MCP tool profiles are fixed when an agent launches and do not change during that agent's lifetime. A template launch uses the template setting, a human-started agent without a template uses the selected agent tool's setting, a per-spawn override wins, and the fallback is Core.";
 
 #[derive(Clone)]
 pub struct WorkmanMcp {
@@ -268,7 +268,7 @@ struct IdentityResult {
 #[tool_router]
 impl WorkmanMcp {
     #[tool(
-        description = "Report this MCP session's actor, process, and effective project identity"
+        description = "Report this MCP session's actor, process, and effective project envelope"
     )]
     async fn whoami(&self, Extension(parts): Extension<Parts>) -> CallToolResult {
         let mut registry = self.registry.lock().await;
@@ -315,8 +315,36 @@ impl WorkmanMcp {
     }
 
     #[tool(description = "Show concise Workman MCP help, optionally for one topic")]
-    async fn help(&self, Parameters(args): Parameters<HelpArgs>) -> CallToolResult {
+    async fn help(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<HelpArgs>,
+    ) -> CallToolResult {
         let topic = args.topic.as_deref().unwrap_or("setup");
+        if topic == "tools" {
+            let all_tools = self.tool_router.list_all();
+            let describe = |name: &&str| {
+                all_tools
+                    .iter()
+                    .find(|tool| tool.name.as_ref() == *name)
+                    .map(|tool| {
+                        format!(
+                            "{} — {}",
+                            tool.name,
+                            tool.description.as_deref().unwrap_or("No description")
+                        )
+                    })
+            };
+            let mut sections = vec![TOOLS_HELP_INTRO.to_owned(), "Core:".to_owned()];
+            sections.extend(CORE_TOOL_NAMES.iter().filter_map(describe));
+            sections.push("Extended (requires the Extended profile):".to_owned());
+            sections.extend(EXTENDED_TOOL_NAMES.iter().filter_map(describe));
+            if self.parts_mcp_tools_profile(&parts).await.is_none() {
+                sections.push("User-only:".to_owned());
+                sections.extend(["agent_tool_configure"].iter().filter_map(describe));
+            }
+            return success(json!({ "topic": topic, "text": sections.join("\n") }));
+        }
         let text = match topic {
             "setup" => {
                 "Connect to /mcp with Streamable HTTP. Daemon-spawned agents authenticate with their process credential and are automatically jailed to their owning project. A user bearer session sees the full tool surface but cannot claim a process identity or perform project-scoped work."
@@ -336,7 +364,6 @@ impl WorkmanMcp {
                 "Use worktree_list to inspect repository worktrees and cached pull-request status. Creation, adoption, and removal stay in the authenticated UI/CLI control channel."
             }
             "timers" => IDLE_TIMER_WAIT_GUIDANCE,
-            "tools" => TOOLS_HELP,
             "spawning" => SPAWN_AGENT_GUIDANCE,
             other => {
                 return failure(
@@ -466,6 +493,10 @@ impl WorkmanMcp {
         let Some(parts) = context.extensions.get::<Parts>() else {
             return None;
         };
+        self.parts_mcp_tools_profile(parts).await
+    }
+
+    async fn parts_mcp_tools_profile(&self, parts: &Parts) -> Option<McpToolsProfile> {
         let token = parts
             .headers
             .get(WORKMAN_MCP_TOKEN_HEADER)

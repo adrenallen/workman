@@ -71,9 +71,34 @@ impl Store {
         now: i64,
         baseline_completion_id: i64,
     ) -> StoreResult<()> {
+        self.update_process_and_spawner_notification(
+            process_id,
+            None,
+            enabled,
+            now,
+            baseline_completion_id,
+        )
+    }
+
+    /// Atomically rename a process and toggle its durable spawner notification setting.
+    pub fn update_process_and_spawner_notification(
+        &self,
+        process_id: ProcessId,
+        new_name: Option<&str>,
+        enabled: bool,
+        now: i64,
+        baseline_completion_id: i64,
+    ) -> StoreResult<()> {
+        let transaction = self.connection().unchecked_transaction()?;
+        if let Some(new_name) = new_name {
+            transaction.execute(
+                "UPDATE processes SET name = ?1 WHERE id = ?2",
+                params![new_name, process_id],
+            )?;
+        }
         if enabled {
             // Repeated enable calls preserve the original arm boundary and delivered state.
-            self.connection().execute(
+            transaction.execute(
                 "INSERT OR IGNORE INTO process_spawner_idle_notifications
                     (process_id, enabled_at, baseline_completion_id,
                      suppressed_completion_id, last_finished_input_at, last_reported_state)
@@ -81,11 +106,12 @@ impl Store {
                 params![process_id, now, baseline_completion_id],
             )?;
         } else {
-            self.connection().execute(
+            transaction.execute(
                 "DELETE FROM process_spawner_idle_notifications WHERE process_id = ?1",
                 [process_id],
             )?;
         }
+        transaction.commit()?;
         Ok(())
     }
 

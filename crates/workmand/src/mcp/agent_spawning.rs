@@ -132,11 +132,9 @@ struct SpawnAgentArgs {
     /// Optional per-launch process name, unique within the project.
     #[serde(default)]
     name: Option<String>,
-    /// Optional per-launch model override. Omit it to use the template or agent default. Supported
-    /// tool_type values and aliases are codex, claude/claude_code, kimi/kimi_code,
-    /// gemini/gemini_cli, grok/grok_cli/grok_build, and opencode/open_code. Workman replaces long
-    /// and short model flags in the registered command, template args, and caller args; other tool
-    /// types return an error with recovery guidance.
+    /// Optional per-launch model override. Omit it to use the template or agent default. Built-in
+    /// tool_type values replace model flags in the registered command, template args, and caller
+    /// args; other types return recovery guidance.
     #[serde(default)]
     model: Option<String>,
     /// Raw, safely shell-quoted flags appended to the registered agent command. Avoid using this
@@ -155,10 +153,8 @@ struct SpawnAgentArgs {
     /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
-    /// Prospectively deliver one coalesced Workman turn to this direct agent spawner when the
-    /// child finishes work after this spawner's submitted input, needs input, exits, or crashes.
-    /// A child parked Waiting on its own timer is not finished. Delivery waits behind unsent human
-    /// drafts; it defaults to false and requires a process identity.
+    /// Deliver one coalesced Workman turn when this direct child finishes, needs input, exits, or
+    /// crashes; defaults to false and requires a process identity.
     #[serde(default)]
     notify_spawner_on_idle: bool,
 }
@@ -244,8 +240,16 @@ struct ResolvedAgentLaunch {
     agent_tool_name: String,
     model: String,
     effort: String,
+    mcp_wired: bool,
     template_args_skipped: Vec<String>,
     mcp_tools_profile: McpToolsProfile,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentToolSummary<'tool> {
+    #[serde(flatten)]
+    tool: &'tool AgentTool,
+    mcp_wired: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -402,10 +406,19 @@ impl WorkmanMcp {
             load_agent_tools(&registry),
             load_agent_template_summaries(&registry),
         ) {
-            (Ok(tools), Ok(templates)) => success(json!({
-                "agent_tools": tools,
-                "agent_templates": templates,
-            })),
+            (Ok(tools), Ok(templates)) => {
+                let tools = tools
+                    .iter()
+                    .map(|tool| AgentToolSummary {
+                        tool,
+                        mcp_wired: mcp_launch_capability(&tool.tool_type).supported,
+                    })
+                    .collect::<Vec<_>>();
+                success(json!({
+                    "agent_tools": tools,
+                    "agent_templates": templates,
+                }))
+            }
             (Err(error), _) | (_, Err(error)) => failure("store_error", error),
         }
     }
@@ -552,7 +565,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn an agent from a tool or optional template listed by list_agent_tools. Overrides carry template model only within the same agent type and never carry command defaults. A selected model supersedes the registered command model; explicit caller model also replaces template and caller flags. resolved reports choices and skips. notify_spawner_on_idle avoids an idle timer unless a deadline matters."
+        description = "Spawn an agent from list_agent_tools. Template: set agent_template_id only; the template supplies its agent tool, model, effort, launch args and prompt, and initial_prompt is appended. Pass model or agent_tool_id only to override. An override keeps the template's model only for the same agent type. resolved includes effective settings and mcp_wired. notify_spawner_on_idle avoids an idle timer unless a deadline matters."
     )]
     async fn spawn_agent(
         &self,
@@ -1276,6 +1289,7 @@ fn resolve_agent_spawn(
             .model
             .is_some();
         let launch_options = configured_launch_options(&tool, &extra_args);
+        let mcp_wired = mcp_launch_capability(&tool.tool_type).supported;
         return Ok(ResolvedAgentSpawn {
             agent_tool_id,
             agent_tool_type: tool.tool_type.clone(),
@@ -1288,6 +1302,7 @@ fn resolve_agent_spawn(
                 agent_tool_name: tool.name,
                 model: launch_value_label(launch_options.model),
                 effort: launch_value_label(launch_options.effort),
+                mcp_wired,
                 template_args_skipped: Vec::new(),
                 mcp_tools_profile: requested_mcp_tools_profile.unwrap_or(tool.mcp_tools_profile),
             },
@@ -1315,6 +1330,7 @@ fn resolve_agent_spawn(
         .model
         .is_some();
     let launch_options = configured_launch_options(&tool, &extra_args);
+    let mcp_wired = mcp_launch_capability(&tool.tool_type).supported;
     Ok(ResolvedAgentSpawn {
         agent_tool_id,
         agent_tool_type: tool.tool_type.clone(),
@@ -1327,6 +1343,7 @@ fn resolve_agent_spawn(
             agent_tool_name: tool.name,
             model: launch_value_label(launch_options.model),
             effort: launch_value_label(launch_options.effort),
+            mcp_wired,
             template_args_skipped,
             mcp_tools_profile: requested_mcp_tools_profile.unwrap_or(template.mcp_tools_profile),
         },

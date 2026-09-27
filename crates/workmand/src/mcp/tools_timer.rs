@@ -53,7 +53,7 @@ struct IdleTimerArgs {
     /// Agent process receiving the fresh prompt. Defaults to the calling process.
     #[serde(default)]
     delivery_process_id: Option<ProcessId>,
-    /// Whether any or every watched process must become idle.
+    /// any uses the first agent with an unreported completion since the caller's last input, else a fresh busy-to-idle transition; all waits for every agent and counts ones already idle.
     wait_for: IdleWaitFor,
 }
 
@@ -107,7 +107,7 @@ struct TimerListArgs {
 #[tool_router(router = timer_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
     #[tool(
-        description = "Set a one-shot or repeating delayed prompt delivery to the user; do not poll while waiting"
+        description = "Set a one-shot or repeating timer. Delivers body to an agent (default: the caller) as a fresh user turn; do not poll while waiting."
     )]
     async fn timer_set(
         &self,
@@ -157,7 +157,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Arm a no-poll wake-up for any or every watched process, with a hard deadline"
+        description = "Arm an idle wake-up with a hard deadline. wait_for=any fires for the first agent with an unreported completion since the caller's last input to it, otherwise after a fresh busy-to-idle transition; wait_for=all fires when every watched agent is idle, counting agents already idle. body arrives as a fresh user turn. After arming for the calling agent, end the turn and do not poll."
     )]
     async fn timer_fire_when_idle(
         &self,

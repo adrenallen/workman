@@ -358,11 +358,6 @@ impl WorkmanMcp {
             Ok(resolved) => resolved,
             Err(error) => return target_failure(error),
         };
-        if let Some(new_name) = args.new_name
-            && let Err(error) = registry.rename(process.id, new_name)
-        {
-            return registry_failure(error);
-        }
         if let Some(enabled) = args.notify_spawner_on_idle {
             let Some(spawner_process_id) = actor.process_id else {
                 return failure(
@@ -370,11 +365,20 @@ impl WorkmanMcp {
                     "notify_spawner_on_idle requires an authenticated process identity",
                 );
             };
-            if let Err(error) =
-                registry.set_notify_spawner_on_idle(spawner_process_id, process.id, enabled)
-            {
-                return registry_failure(error);
-            }
+            return match registry.update_process_for_spawner(
+                spawner_process_id,
+                process.id,
+                args.new_name,
+                enabled,
+            ) {
+                Ok(status) => success(status),
+                Err(error) => registry_failure(error),
+            };
+        }
+        if let Some(new_name) = args.new_name
+            && let Err(error) = registry.rename(process.id, new_name)
+        {
+            return registry_failure(error);
         }
         match registry.get_status(process.id) {
             Ok(status) => success(status),

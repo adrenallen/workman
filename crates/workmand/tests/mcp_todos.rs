@@ -265,6 +265,31 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
     .await;
     assert_eq!(merged_update["blocker_ids"], json!([]));
 
+    let failed_update = invoke(
+        &first,
+        "todo_update",
+        json!({
+            "todo_id": todo_id,
+            "title": "This title must roll back",
+            "add_tags": ["must-roll-back"],
+            "add_blocker_ids": [999_999]
+        }),
+    )
+    .await;
+    assert_eq!(failed_update.is_error, Some(true));
+    let after_failed_update = call(&first, "todo_get", json!({ "todo_id": todo_id })).await;
+    assert_eq!(
+        after_failed_update["todo"]["title"],
+        "Claim exactly once through MCP"
+    );
+    assert!(
+        !after_failed_update["todo"]["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("must-roll-back")),
+        "a rejected merged mutation must not persist earlier subfields"
+    );
+
     let first_lock = invoke(
         &first,
         "todo_lock",
