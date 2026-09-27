@@ -52,6 +52,10 @@ pub const DEFAULT_RAW_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
 /// Default maximum raw-output bytes retained in a daemon-managed spill file.
 pub const DEFAULT_OUTPUT_SPILL_CAPACITY: usize = 8 * 1024 * 1024;
 
+/// Unknown composers cannot prove that a draft is still present. Keep unsolicited
+/// automation away for a generous human-edit window, then allow it to proceed.
+const UNKNOWN_COMPOSER_DRAFT_HOLD: Duration = Duration::from_secs(120);
+
 /// Default PTY dimensions used when the caller has not observed a terminal yet.
 pub const DEFAULT_PTY_SIZE: PtySize = PtySize {
     rows: 24,
@@ -543,6 +547,8 @@ struct TypingActivity {
     last_input: Mutex<Option<Instant>>,
     delay_ms: AtomicU64,
     unsent_human_draft: AtomicBool,
+    bracketed_paste_active: AtomicBool,
+    notification_held_by_draft: AtomicBool,
 }
 
 impl TypingActivity {
@@ -587,7 +593,7 @@ impl PtyInputHandle {
 
     /// Record a real keyboard/paste event and write it without waiting for queued messages.
     /// The writer lock makes recording input atomic with automatic delivery's final check.
-    pub fn write_user_input(&self, bytes: &[u8]) -> io::Result<()> {
+    pub fn write_user_input(&self, bytes: &[u8]) -> io::Result<bool> {
         let mut writer = self
             .writer
             .lock()
@@ -598,20 +604,22 @@ impl PtyInputHandle {
             .last_input
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
-        if bytes
-            .iter()
-            .any(|byte| matches!(byte, b'\r' | b'\n' | 0x03 | 0x15))
-        {
+        let submits_prompt =
+            user_frame_is_submission(&self.typing_activity.bracketed_paste_active, bytes);
+        if submits_prompt {
             self.typing_activity
                 .unsent_human_draft
                 .store(false, Ordering::Release);
-        } else if bytes.iter().any(|byte| !byte.is_ascii_control()) || bytes.is_empty() {
+        } else {
+            // Control-only frames can still create a draft (for example Ctrl-V
+            // inserts an image), and modified/newline keys edit multi-line drafts.
             self.typing_activity
                 .unsent_human_draft
                 .store(true, Ordering::Release);
         }
         writer.write_all(bytes)?;
-        writer.flush()
+        writer.flush()?;
+        Ok(submits_prompt)
     }
 
     /// Update the delay for both future and already-queued submissions. Zero disables it.
@@ -629,27 +637,34 @@ impl PtyInputHandle {
 
     /// Whether user-originated text is still present in an interactive agent composer.
     ///
-    /// This is intentionally separate from the finite typing pause. Unsolicited automation may
-    /// use it to wait indefinitely for a human to submit or clear a draft without changing the
-    /// established timer submission behavior.
+    /// This is intentionally separate from the finite typing pause and does not affect timer
+    /// delivery. A positively non-empty composer is a hard hold. An unknown composer is held only
+    /// while human input is newer than [`UNKNOWN_COMPOSER_DRAFT_HOLD`].
     pub fn has_unsent_human_draft(&self) -> bool {
-        if !self
+        let human_draft_activity = self
             .typing_activity
             .unsent_human_draft
-            .load(Ordering::Acquire)
-        {
-            return false;
-        }
+            .load(Ordering::Acquire);
         let viewport = self.terminal_output.read_viewport();
         match composer_draft_state(&viewport.rows) {
-            ComposerDraftState::NonEmpty | ComposerDraftState::Unknown => true,
-            ComposerDraftState::Empty => {
-                let typing_is_settling = self
+            ComposerDraftState::NonEmpty => human_draft_activity,
+            ComposerDraftState::Unknown => {
+                let recent_human_input = self
                     .typing_activity
                     .last_input
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .is_some_and(|last| last.elapsed() < Duration::from_millis(500));
+                    .is_some_and(|last| last.elapsed() < UNKNOWN_COMPOSER_DRAFT_HOLD);
+                human_draft_activity && recent_human_input
+            }
+            ComposerDraftState::Empty => {
+                let typing_is_settling = human_draft_activity
+                    && self
+                        .typing_activity
+                        .last_input
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .is_some_and(|last| last.elapsed() < Duration::from_millis(500));
                 if typing_is_settling {
                     true
                 } else {
@@ -660,6 +675,28 @@ impl PtyInputHandle {
                 }
             }
         }
+    }
+
+    /// Record whether child-notification delivery is actively held by the draft guard.
+    pub fn set_notification_held_by_draft(&self, held: bool) -> bool {
+        self.typing_activity
+            .notification_held_by_draft
+            .swap(held, Ordering::AcqRel)
+            != held
+    }
+
+    /// Whether child-notification delivery is actively held by the draft guard.
+    pub fn notification_held_by_draft(&self) -> bool {
+        self.typing_activity
+            .notification_held_by_draft
+            .load(Ordering::Acquire)
+    }
+
+    /// End the human-draft episode after this guard has allowed an automatic submission.
+    pub fn clear_human_draft_activity(&self) {
+        self.typing_activity
+            .unsent_human_draft
+            .store(false, Ordering::Release);
     }
 
     /// Queue content followed by Enter as one ordered process-local submission.
@@ -1404,38 +1441,98 @@ enum ComposerDraftState {
     Unknown,
 }
 
+fn user_frame_is_submission(bracketed_paste_active: &AtomicBool, bytes: &[u8]) -> bool {
+    let started_in_paste = bracketed_paste_active.load(Ordering::Acquire);
+    let mut in_paste = started_in_paste;
+    let mut saw_paste_boundary = false;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset..].starts_with(BRACKETED_PASTE_START) {
+            in_paste = true;
+            saw_paste_boundary = true;
+            offset += BRACKETED_PASTE_START.len();
+        } else if bytes[offset..].starts_with(BRACKETED_PASTE_END) {
+            in_paste = false;
+            saw_paste_boundary = true;
+            offset += BRACKETED_PASTE_END.len();
+        } else {
+            offset += 1;
+        }
+    }
+    bracketed_paste_active.store(in_paste, Ordering::Release);
+
+    !started_in_paste
+        && !saw_paste_boundary
+        && matches!(
+            bytes,
+            b"\r" | b"\n" | b"\x1b[13u" | b"\x1b[13;1u" | b"\x1b[27;1;13~"
+        )
+}
+
+fn codex_particle(character: char) -> bool {
+    matches!(character, '⠁' | '⠂' | '⠄' | '⡀' | '⠈' | '⠐' | '⠠' | '⢀')
+}
+
+fn visible_composer_text(
+    row: &crate::terminal::RenderedRow,
+    cells_to_skip: usize,
+    strip_codex_particles: bool,
+) -> String {
+    row.cells
+        .iter()
+        .skip(cells_to_skip)
+        .filter(|cell| !cell.flags.contains(crate::terminal::CellFlags::DIM))
+        .flat_map(|cell| std::iter::once(cell.character).chain(cell.zero_width.iter().copied()))
+        .filter(|character| !strip_codex_particles || !codex_particle(*character))
+        .collect()
+}
+
+fn is_composer_placeholder(marker: char, draft: &str) -> bool {
+    marker == '›'
+        && matches!(
+            draft
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .as_str(),
+            "Ask Codex to do anything"
+                | "Ask Codex anything"
+                | "Ask anything"
+                | "Ask a follow-up question"
+        )
+}
+
 fn composer_draft_state(rows: &[crate::terminal::RenderedRow]) -> ComposerDraftState {
     for (index, row) in rows.iter().enumerate().rev() {
-        let line = row.text.trim_start();
-        let Some((marker, draft)) = line
-            .strip_prefix('❯')
-            .map(|draft| ('❯', draft))
-            .or_else(|| line.strip_prefix('›').map(|draft| ('›', draft)))
+        let Some((marker_cell, marker)) = row
+            .cells
+            .iter()
+            .enumerate()
+            .find_map(|(offset, cell)| {
+                (!cell.character.is_whitespace()).then_some((offset, cell.character))
+            })
+            .filter(|(_, marker)| matches!(marker, '❯' | '›'))
         else {
             continue;
         };
+        let mut draft = visible_composer_text(row, marker_cell + 1, marker == '›');
         if marker == '❯' && crate::attention::is_claude_dialog_choice(draft.trim()) {
             return ComposerDraftState::Unknown;
-        }
-        let placeholder = marker == '›'
-            && matches!(
-                draft.trim(),
-                "Ask Codex to do anything" | "Ask Codex anything" | "Ask anything"
-            );
-        if !draft.trim().is_empty() && !placeholder {
-            return ComposerDraftState::NonEmpty;
         }
         let mut wrapped = row.wrapped;
         let mut continuation = index + 1;
         while wrapped && continuation < rows.len() {
             let next = &rows[continuation];
-            if !next.text.trim().is_empty() {
-                return ComposerDraftState::NonEmpty;
-            }
+            draft.push_str(&visible_composer_text(next, 0, marker == '›'));
             wrapped = next.wrapped;
             continuation += 1;
         }
-        return ComposerDraftState::Empty;
+        let draft = draft.trim();
+        return if draft.is_empty() || is_composer_placeholder(marker, draft) {
+            ComposerDraftState::Empty
+        } else {
+            ComposerDraftState::NonEmpty
+        };
     }
     ComposerDraftState::Unknown
 }
@@ -2763,7 +2860,7 @@ mod tests {
     }
 
     #[test]
-    fn unsent_human_draft_guard_is_indefinite_and_does_not_change_automatic_submissions() {
+    fn unsent_human_draft_guard_is_composer_aware_and_does_not_change_automatic_submissions() {
         let terminal = TerminalOutput::new(24, 80, 100);
         let attention = AttentionTracker::new(Some("claude_code".into()));
         let (input, writes, task, _) = submission_fixture_for(terminal.clone(), attention.clone());
@@ -2782,14 +2879,97 @@ mod tests {
 
         input.write_user_input(b"\x15").unwrap();
         assert_eq!(writes.recv().unwrap().0, b"\x15");
+        terminal.feed_with_replies("\r\x1b[2K❯ ".as_bytes());
+        thread::sleep(Duration::from_millis(510));
         assert!(!input.has_unsent_human_draft());
 
-        input.write_user_input(b"submitted\r").unwrap();
-        assert_eq!(writes.recv().unwrap().0, b"submitted\r");
+        assert!(!input.write_user_input(b"submitted").unwrap());
+        assert_eq!(writes.recv().unwrap().0, b"submitted");
+        assert!(input.write_user_input(b"\r").unwrap());
+        assert_eq!(writes.recv().unwrap().0, b"\r");
         assert!(!input.has_unsent_human_draft());
+        assert!(input.set_notification_held_by_draft(true));
+        assert!(input.notification_held_by_draft());
+        assert!(input.set_notification_held_by_draft(false));
         drop(input);
         attention.mark_exited();
         task.join().unwrap();
+    }
+
+    #[test]
+    fn multiline_paste_modified_enter_and_control_only_frames_remain_drafts() {
+        for frames in [
+            vec![
+                BRACKETED_PASTE_START,
+                b"error line 1\rline 2 then my question:",
+                BRACKETED_PASTE_END,
+            ],
+            vec![b"question", b"\x1b\r"],
+            vec![b"\x16"],
+        ] {
+            let terminal = TerminalOutput::new(24, 80, 100);
+            let attention = AttentionTracker::new(Some("claude_code".into()));
+            let (input, writes, task, _) =
+                submission_fixture_for(terminal.clone(), attention.clone());
+            input.set_typing_idle_delay(Duration::ZERO);
+            for frame in frames {
+                assert!(!input.write_user_input(frame).unwrap());
+                assert_eq!(writes.recv().unwrap().0, frame);
+            }
+            terminal.feed_with_replies("\x1b[2J\x1b[H❯ unsent draft".as_bytes());
+            assert!(input.has_unsent_human_draft());
+            drop(input);
+            attention.mark_exited();
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn unknown_composer_hold_expires_but_positive_draft_never_does() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(Some("kimi".into()));
+        let (input, writes, task, _) = submission_fixture_for(terminal.clone(), attention.clone());
+        input.set_typing_idle_delay(Duration::ZERO);
+        input.write_user_input(b"x\x7f").unwrap();
+        writes.recv().unwrap();
+        terminal.feed_with_replies("\x1b[2J\x1b[H> ".as_bytes());
+        assert!(input.has_unsent_human_draft());
+        *input.typing_activity.last_input.lock().unwrap() =
+            Some(Instant::now() - UNKNOWN_COMPOSER_DRAFT_HOLD - Duration::from_secs(1));
+        assert!(!input.has_unsent_human_draft());
+
+        input.write_user_input(b"real draft").unwrap();
+        writes.recv().unwrap();
+        terminal.feed_with_replies("\x1b[2J\x1b[H❯ real draft".as_bytes());
+        *input.typing_activity.last_input.lock().unwrap() =
+            Some(Instant::now() - UNKNOWN_COMPOSER_DRAFT_HOLD - Duration::from_secs(1));
+        assert!(input.has_unsent_human_draft());
+        drop(input);
+        attention.mark_exited();
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn styled_and_animated_composer_placeholders_are_empty() {
+        for rendered in [
+            "\x1b[2J\x1b[H›⠁Ask Codex to do anything ⠄",
+            "\x1b[2J\x1b[H› Ask a follow-up question",
+            "\x1b[2J\x1b[H❯ \x1b[2mTry \"summarize this\"\x1b[22m",
+        ] {
+            let terminal = TerminalOutput::new(24, 80, 100);
+            let attention = AttentionTracker::new(Some("codex".into()));
+            let (input, writes, task, _) =
+                submission_fixture_for(terminal.clone(), attention.clone());
+            input.write_user_input(b"x").unwrap();
+            writes.recv().unwrap();
+            terminal.feed_with_replies(rendered.as_bytes());
+            *input.typing_activity.last_input.lock().unwrap() =
+                Some(Instant::now() - Duration::from_secs(1));
+            assert!(!input.has_unsent_human_draft(), "{rendered:?}");
+            drop(input);
+            attention.mark_exited();
+            task.join().unwrap();
+        }
     }
 
     #[test]

@@ -216,7 +216,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Prospectively enable or disable coalesced child completion, needs-input, exit, and crash turns to the authenticated direct spawner, which must be an agent. Finished turns require work after that spawner's submitted input and exclude a child parked Waiting on its own timer; human drafts hold delivery, and an explicit pending idle timer wins. Only the process that spawned this child may change the setting; project jail rules still apply."
+        description = "Prospectively enable or disable durable, coalesced child completion, needs-input, exit, and crash turns to the authenticated direct spawner, which must be an agent. The opt-in survives child exit/crash and restart. Finished is capped once per child input, excludes a child parked Waiting on its own active timer, and yields to an active unpaused idle timer owned by the spawner for the same watched child; other reasons still notify. Positive human drafts hold indefinitely, while unknown composers hold for 120 seconds after human input. Only the process that spawned this child may change the setting; project jail rules still apply."
     )]
     async fn set_notify_spawner_on_idle(
         &self,

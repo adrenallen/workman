@@ -330,6 +330,7 @@ impl<'a> TimerService<'a> {
             ..TimerRuntime::default()
         };
         self.insert(&timer, &runtime)?;
+        self.registry.status_invalidations().invalidate();
         self.view(timer, runtime)
     }
 
@@ -469,6 +470,7 @@ impl<'a> TimerService<'a> {
             },
         };
         self.insert(&timer, &runtime)?;
+        self.registry.status_invalidations().invalidate();
         Ok(IdleTimerOutcome::Created(Box::new(
             self.view(timer, runtime)?,
         )))
@@ -487,6 +489,7 @@ impl<'a> TimerService<'a> {
             .connection()
             .execute("DELETE FROM timers WHERE id = ?1", [timer_id])
             .map_err(persistence)?;
+        self.registry.status_invalidations().invalidate();
         self.view(timer, runtime)
     }
 
@@ -506,6 +509,7 @@ impl<'a> TimerService<'a> {
             timer.paused = true;
             runtime.paused_at = Some(now_ms);
             self.update(&timer, &runtime)?;
+            self.registry.status_invalidations().invalidate();
         }
         self.view(timer, runtime)
     }
@@ -532,6 +536,7 @@ impl<'a> TimerService<'a> {
             timer.paused = false;
             timer.max_wait_deadline = Some(runtime.due_at);
             self.update(&timer, &runtime)?;
+            self.registry.status_invalidations().invalidate();
         }
         self.view(timer, runtime)
     }
@@ -700,6 +705,7 @@ impl<'a> TimerService<'a> {
             .connection()
             .execute("DELETE FROM timers WHERE id = ?1", [timer_id])
             .map_err(persistence)?;
+        self.registry.status_invalidations().invalidate();
         self.view(timer, runtime)
     }
 
@@ -769,6 +775,7 @@ impl<'a> TimerService<'a> {
         timer.fired = true;
         timer.fired_at = Some(now_ms);
         self.registry.store().put_timer(&timer)?;
+        self.registry.status_invalidations().invalidate();
 
         let mut diagnostics = TimerDiagnostics::default();
         diagnostics.record_error();
@@ -875,6 +882,7 @@ impl<'a> TimerService<'a> {
             timer.fired = true;
         }
         self.update(&timer, &runtime)?;
+        self.registry.status_invalidations().invalidate();
 
         if let Some(owner_process_id) = timer.owner_process_id {
             let ledger = CompletionLedger::new(self.registry.store());

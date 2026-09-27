@@ -271,7 +271,18 @@ impl ProcessInputRouter {
         if !*active {
             return Err(RegistryError::NotRunning(process_id));
         }
-        let submits_prompt = data.iter().any(|byte| matches!(byte, b'\r' | b'\n'));
+        let submits_prompt = if user_initiated {
+            target.input.write_user_input(data)
+        } else {
+            target
+                .input
+                .write_all(data)
+                .map(|()| data.iter().any(|byte| matches!(byte, b'\r' | b'\n')))
+        }
+        .map_err(|error| RegistryError::Pty {
+            process_id,
+            message: error.to_string(),
+        })?;
         if !submits_prompt
             && matches!(
                 target.attention.snapshot().state,
@@ -280,15 +291,6 @@ impl ProcessInputRouter {
         {
             target.attention.suppress_ui_activity();
         }
-        (if user_initiated {
-            target.input.write_user_input(data)
-        } else {
-            target.input.write_all(data)
-        })
-        .map_err(|error| RegistryError::Pty {
-            process_id,
-            message: error.to_string(),
-        })?;
         if submits_prompt {
             target.attention.observe_input();
         }
@@ -420,6 +422,36 @@ impl ProcessInputRouter {
     /// Hold unsolicited automation while a human has unsubmitted composer text.
     pub(crate) fn has_unsent_human_draft(&self, process_id: ProcessId) -> RegistryResult<bool> {
         Ok(self.target(process_id)?.input.has_unsent_human_draft())
+    }
+
+    pub(crate) fn set_notification_held_by_draft(
+        &self,
+        process_id: ProcessId,
+        held: bool,
+    ) -> RegistryResult<bool> {
+        Ok(self
+            .target(process_id)?
+            .input
+            .set_notification_held_by_draft(held))
+    }
+
+    pub(crate) fn notification_held_by_draft(&self, process_id: ProcessId) -> bool {
+        self.targets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&process_id)
+            .is_some_and(|target| target.input.notification_held_by_draft())
+    }
+
+    pub(crate) fn clear_human_draft_activity(&self, process_id: ProcessId) {
+        if let Some(target) = self
+            .targets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&process_id)
+        {
+            target.input.clear_human_draft_activity();
+        }
     }
 
     pub(crate) fn set_typing_pause(&self, settings: crate::settings::TypingPauseSettings) {
@@ -561,6 +593,9 @@ pub struct ProcessStatusView {
     /// Opt-in child-to-spawner turn delivery. Separate from the desktop one-shot idle alert.
     #[serde(default)]
     pub notify_spawner_on_idle: bool,
+    /// A child-notification turn is currently held behind this process's human draft.
+    #[serde(default)]
+    pub notification_held_by_draft: bool,
     /// Ephemeral lifecycle notices, including automatic dialog acknowledgments.
     pub events: Vec<ProcessEvent>,
     /// Conversation ID passively discovered from the agent CLI's own session store.
@@ -1000,6 +1035,7 @@ impl ProcessRegistry {
         Ok(ProcessStatusView {
             notify_on_idle: idle_watch && !idle_alert_fired,
             notify_spawner_on_idle: self.store.spawner_idle_notification_enabled(process.id)?,
+            notification_held_by_draft: self.input_router.notification_held_by_draft(process.id),
             process,
             agent_state,
             events,
@@ -1203,39 +1239,38 @@ impl ProcessRegistry {
 
     /// Read the pending-timer relationships needed by child-to-spawner notification delivery.
     ///
-    /// The first set contains `(owner process, watched process)` pairs for explicit idle timers;
-    /// the second contains processes whose idle state is refined to Waiting by any pending timer.
-    /// This intentionally mirrors `waiting_reasons` without observing status or writing rows.
+    /// The first set contains `(owner process, watched process)` pairs for active, unpaused idle
+    /// timers. The second contains owner processes parked on their own active, unpaused timer;
+    /// being somebody else's delivery target is not parking. This is read-only.
     pub(crate) fn notification_timer_context(&self) -> RegistryResult<NotificationTimerContext> {
         let mut statement = self
             .store
             .connection()
             .prepare(
                 "SELECT timer.kind,
-                        timer.delivery_process_id,
                         timer.watch_list,
                         actor.process_id
                  FROM timers AS timer
                  LEFT JOIN actors AS actor ON actor.id = timer.owner_actor
-                 WHERE timer.fired = 0",
+                 WHERE timer.fired = 0 AND timer.paused = 0",
             )
             .map_err(StoreError::from)?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, TimerKind>(0)?,
-                    row.get::<_, ProcessId>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<ProcessId>>(3)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<ProcessId>>(2)?,
                 ))
             })
             .map_err(StoreError::from)?;
         let mut owned_idle_watches = HashSet::new();
         let mut waiting_processes = HashSet::new();
         for row in rows {
-            let (kind, delivery_process_id, watch_list, owner_process_id) =
-                row.map_err(StoreError::from)?;
-            waiting_processes.insert(delivery_process_id);
+            let (kind, watch_list, owner_process_id) = row.map_err(StoreError::from)?;
+            if let Some(owner_process_id) = owner_process_id {
+                waiting_processes.insert(owner_process_id);
+            }
             if matches!(kind, TimerKind::IdleAny | TimerKind::IdleAll)
                 && let Some(owner_process_id) = owner_process_id
             {

@@ -114,6 +114,7 @@ mod tests {
         ProcessStatusView {
             notify_on_idle: false,
             notify_spawner_on_idle: false,
+            notification_held_by_draft: false,
             process: Process {
                 id,
                 project_id,

@@ -14,6 +14,8 @@ pub struct SpawnerIdleNotificationSetting {
     pub process_id: ProcessId,
     pub enabled_at: i64,
     pub baseline_completion_id: i64,
+    pub suppressed_completion_id: i64,
+    pub last_finished_input_at: Option<i64>,
     pub last_reported_state: SpawnerReportedState,
 }
 
@@ -73,8 +75,9 @@ impl Store {
             // Repeated enable calls preserve the original arm boundary and delivered state.
             self.connection().execute(
                 "INSERT OR IGNORE INTO process_spawner_idle_notifications
-                    (process_id, enabled_at, baseline_completion_id, last_reported_state)
-                 VALUES (?1, ?2, ?3, 'neutral')",
+                    (process_id, enabled_at, baseline_completion_id,
+                     suppressed_completion_id, last_finished_input_at, last_reported_state)
+                 VALUES (?1, ?2, ?3, 0, NULL, 'neutral')",
                 params![process_id, now, baseline_completion_id],
             )?;
         } else {
@@ -90,16 +93,19 @@ impl Store {
         &self,
     ) -> StoreResult<Vec<SpawnerIdleNotificationSetting>> {
         let mut statement = self.connection().prepare(
-            "SELECT process_id, enabled_at, baseline_completion_id, last_reported_state
+            "SELECT process_id, enabled_at, baseline_completion_id,
+                    suppressed_completion_id, last_finished_input_at, last_reported_state
              FROM process_spawner_idle_notifications
              ORDER BY process_id",
         )?;
         let rows = statement.query_map([], |row| {
-            let state = row.get::<_, String>(3)?;
+            let state = row.get::<_, String>(5)?;
             Ok(SpawnerIdleNotificationSetting {
                 process_id: row.get(0)?,
                 enabled_at: row.get(1)?,
                 baseline_completion_id: row.get(2)?,
+                suppressed_completion_id: row.get(3)?,
+                last_finished_input_at: row.get(4)?,
                 last_reported_state: SpawnerReportedState::parse(&state)?,
             })
         })?;
@@ -119,6 +125,33 @@ impl Store {
         )? > 0)
     }
 
+    pub fn advance_spawner_suppressed_completion(
+        &self,
+        process_id: ProcessId,
+        completion_id: i64,
+    ) -> StoreResult<bool> {
+        Ok(self.connection().execute(
+            "UPDATE process_spawner_idle_notifications
+             SET suppressed_completion_id = MAX(suppressed_completion_id, ?2)
+             WHERE process_id = ?1 AND suppressed_completion_id < ?2",
+            params![process_id, completion_id],
+        )? > 0)
+    }
+
+    pub fn advance_spawner_finished_input(
+        &self,
+        process_id: ProcessId,
+        input_at: i64,
+    ) -> StoreResult<bool> {
+        Ok(self.connection().execute(
+            "UPDATE process_spawner_idle_notifications
+             SET last_finished_input_at = MAX(COALESCE(last_finished_input_at, ?2), ?2)
+             WHERE process_id = ?1
+               AND (last_finished_input_at IS NULL OR last_finished_input_at < ?2)",
+            params![process_id, input_at],
+        )? > 0)
+    }
+
     pub fn spawner_idle_notification_setting(
         &self,
         process_id: ProcessId,
@@ -126,16 +159,19 @@ impl Store {
         Ok(self
             .connection()
             .query_row(
-                "SELECT process_id, enabled_at, baseline_completion_id, last_reported_state
+                "SELECT process_id, enabled_at, baseline_completion_id,
+                        suppressed_completion_id, last_finished_input_at, last_reported_state
                  FROM process_spawner_idle_notifications
                  WHERE process_id = ?1",
                 [process_id],
                 |row| {
-                    let state = row.get::<_, String>(3)?;
+                    let state = row.get::<_, String>(5)?;
                     Ok(SpawnerIdleNotificationSetting {
                         process_id: row.get(0)?,
                         enabled_at: row.get(1)?,
                         baseline_completion_id: row.get(2)?,
+                        suppressed_completion_id: row.get(3)?,
+                        last_finished_input_at: row.get(4)?,
                         last_reported_state: SpawnerReportedState::parse(&state)?,
                     })
                 },
@@ -174,7 +210,17 @@ mod tests {
         let setting = store.spawner_idle_notification_setting(2).unwrap().unwrap();
         assert_eq!(setting.enabled_at, 10);
         assert_eq!(setting.baseline_completion_id, 41);
+        assert_eq!(setting.suppressed_completion_id, 0);
+        assert_eq!(setting.last_finished_input_at, None);
         assert_eq!(setting.last_reported_state, SpawnerReportedState::Neutral);
+
+        assert!(store.advance_spawner_suppressed_completion(2, 50).unwrap());
+        assert!(!store.advance_spawner_suppressed_completion(2, 49).unwrap());
+        assert!(store.advance_spawner_finished_input(2, 60).unwrap());
+        assert!(!store.advance_spawner_finished_input(2, 60).unwrap());
+        let progress = store.spawner_idle_notification_setting(2).unwrap().unwrap();
+        assert_eq!(progress.suppressed_completion_id, 50);
+        assert_eq!(progress.last_finished_input_at, Some(60));
 
         assert!(
             store
@@ -229,6 +275,14 @@ mod tests {
                 .unwrap()
                 .baseline_completion_id,
             41
+        );
+        assert_eq!(
+            reopened
+                .spawner_idle_notification_setting(2)
+                .unwrap()
+                .unwrap()
+                .suppressed_completion_id,
+            0
         );
     }
 }

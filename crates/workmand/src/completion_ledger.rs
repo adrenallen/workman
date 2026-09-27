@@ -203,6 +203,21 @@ impl<'a> CompletionLedger<'a> {
             .optional()?)
     }
 
+    pub(crate) fn completion_input_at(
+        &self,
+        completion_id: i64,
+    ) -> CompletionLedgerResult<Option<i64>> {
+        Ok(self
+            .store
+            .connection()
+            .query_row(
+                "SELECT input_at FROM process_completions WHERE id = ?1",
+                [completion_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Mark one completion (and all older ones for that process) as reported to an owner.
     pub(crate) fn mark_completion_reported(
         &self,
