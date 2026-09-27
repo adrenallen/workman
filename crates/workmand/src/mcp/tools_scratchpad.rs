@@ -11,7 +11,7 @@ use serde_json::json;
 use workman_core::{
     NewScratchpadComment, ProjectId, ScratchpadCommentId, ScratchpadEditTarget,
     ScratchpadFindQuery, ScratchpadFindScope, ScratchpadId, ScratchpadListQuery,
-    ScratchpadReadMode, ScratchpadService, ScratchpadServiceError,
+    ScratchpadMetadataUpdate, ScratchpadReadMode, ScratchpadService, ScratchpadServiceError,
 };
 
 use super::{WorkmanMcp, failure, now_millis, scoped_project, success};
@@ -231,7 +231,9 @@ struct ScratchpadUpdateArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
     scratchpad_id: ScratchpadId,
-    expected_revision: i64,
+    /// Required for a rename; optional for tags-only or archive updates.
+    #[serde(default)]
+    expected_revision: Option<i64>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -273,7 +275,9 @@ struct ScratchpadLoadArgs {
 
 #[tool_router(router = scratchpad_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
-    #[tool(description = "Create or replace scratchpad content and tags at an expected revision")]
+    #[tool(
+        description = "Create or replace scratchpad content and tags at an expected revision; a leading H1 becomes the name"
+    )]
     async fn scratchpad_write(
         &self,
         Extension(parts): Extension<Parts>,
@@ -410,27 +414,16 @@ impl WorkmanMcp {
         if args.body.is_none() && args.resolved.is_none() {
             return failure("invalid_params", "set body, resolved, or both");
         }
-        let service = ScratchpadService::attributed(registry.store(), actor.id);
-        let mut comment = if let Some(body) = args.body {
-            match service.comment_update(project.id, args.comment_id, body, now_millis()) {
-                Ok(comment) => Some(comment),
-                Err(error) => return scratchpad_failure(error),
-            }
-        } else {
-            None
-        };
-        if let Some(resolved) = args.resolved {
-            comment = match service.comment_set_resolved(
-                project.id,
-                args.comment_id,
-                resolved,
-                now_millis(),
-            ) {
-                Ok(comment) => Some(comment),
-                Err(error) => return scratchpad_failure(error),
-            };
+        match ScratchpadService::attributed(registry.store(), actor.id).comment_update_merged(
+            project.id,
+            args.comment_id,
+            args.body,
+            args.resolved,
+            now_millis(),
+        ) {
+            Ok(comment) => success(comment),
+            Err(error) => scratchpad_failure(error),
         }
-        success(comment.expect("one comment mutation ran"))
     }
 
     #[tool(description = "Delete a scratchpad comment authored by the calling agent")]
@@ -589,7 +582,9 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Update scratchpad name, tags, or archive state at an expected revision")]
+    #[tool(
+        description = "Update scratchpad name, tags, or archive state; expected_revision is required only for rename"
+    )]
     async fn scratchpad_update(
         &self,
         Extension(parts): Extension<Parts>,
@@ -614,43 +609,20 @@ impl WorkmanMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         let actor_label = registry.store().actor_display_label(&actor.id);
-        let service = ScratchpadService::attributed(registry.store(), actor_label);
-        let mut revision = args.expected_revision;
-        let mut scratchpad = None;
-        if let Some(name) = args.name {
-            scratchpad = match service.rename(project.id, args.scratchpad_id, name, revision) {
-                Ok(value) => {
-                    revision = value.revision;
-                    Some(value)
-                }
-                Err(error) => return scratchpad_failure(error),
-            };
+        match ScratchpadService::attributed(registry.store(), actor_label).update_metadata(
+            project.id,
+            args.scratchpad_id,
+            ScratchpadMetadataUpdate {
+                name: args.name,
+                add_tags: args.add_tags.unwrap_or_default(),
+                remove_tags: args.remove_tags.unwrap_or_default(),
+                archived: args.archived,
+            },
+            args.expected_revision,
+        ) {
+            Ok(scratchpad) => success(scratchpad),
+            Err(error) => scratchpad_failure(error),
         }
-        if let Some(tags) = args.add_tags {
-            scratchpad = match service.add_tags(project.id, args.scratchpad_id, tags, revision) {
-                Ok(value) => {
-                    revision = value.revision;
-                    Some(value)
-                }
-                Err(error) => return scratchpad_failure(error),
-            };
-        }
-        if let Some(tags) = args.remove_tags {
-            scratchpad = match service.remove_tags(project.id, args.scratchpad_id, tags, revision) {
-                Ok(value) => {
-                    revision = value.revision;
-                    Some(value)
-                }
-                Err(error) => return scratchpad_failure(error),
-            };
-        }
-        if args.archived == Some(true) {
-            scratchpad = match service.archive(project.id, args.scratchpad_id, Some(revision)) {
-                Ok(value) => Some(value),
-                Err(error) => return scratchpad_failure(error),
-            };
-        }
-        success(scratchpad.expect("one scratchpad mutation ran"))
     }
 
     #[tool(description = "Delete a scratchpad at an expected revision")]

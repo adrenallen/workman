@@ -309,6 +309,39 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     for tool in &tools {
         assert_schema_hygiene(&Value::Object((*tool.input_schema).clone()));
     }
+    let whoami_tool = tools.iter().find(|tool| tool.name == "whoami").unwrap();
+    assert!(
+        whoami_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("project envelope"))
+    );
+    let scratchpad_write_tool = tools
+        .iter()
+        .find(|tool| tool.name == "scratchpad_write")
+        .unwrap();
+    assert!(
+        scratchpad_write_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("a leading H1 becomes the name"))
+    );
+    let scratchpad_update_tool = tools
+        .iter()
+        .find(|tool| tool.name == "scratchpad_update")
+        .unwrap();
+    assert!(
+        scratchpad_update_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("required only for rename"))
+    );
+    assert!(
+        !scratchpad_update_tool.input_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("expected_revision"))
+    );
     let mut tool_names: Vec<_> = tools
         .into_iter()
         .map(|tool| tool.name.into_owned())
@@ -398,12 +431,12 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .contains("read it back with scratchpad_read or todo_get and reference its ID")
     );
     let tools_help = call(&process_client, "help", json!({ "topic": "tools" })).await;
-    assert!(
-        tools_help["text"]
-            .as_str()
-            .unwrap()
-            .contains("tools/list request")
-    );
+    let tools_help_text = tools_help["text"].as_str().unwrap();
+    assert!(tools_help_text.contains("whoami —"));
+    assert!(tools_help_text.contains("spawn_agent —"));
+    assert!(tools_help_text.contains("timer_fire_when_idle —"));
+    assert!(!tools_help_text.contains("tools/list request"));
+    assert!(!tools_help_text.contains("agent_tool_configure —"));
     let spawning_help = call(&process_client, "help", json!({ "topic": "spawning" })).await;
     assert!(
         spawning_help["text"]
@@ -416,6 +449,30 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .as_str()
             .unwrap()
             .contains("pick agent_tool_id from list_agent_tools")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("Template: set agent_template_id only")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("supplies its agent tool, model, effort, launch args and prompt")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("Pass model or agent_tool_id only to override")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("A selected model supersedes the registered command model")
     );
     assert!(
         spawning_help["text"]

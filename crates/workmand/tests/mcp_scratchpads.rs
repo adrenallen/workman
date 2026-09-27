@@ -683,8 +683,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         "scratchpad_update",
         json!({
             "scratchpad_id": scratchpad_id,
-            "add_tags": ["Shared", "MCP"],
-            "expected_revision": 8
+            "add_tags": ["Shared", "MCP"]
         }),
     )
     .await;
@@ -694,14 +693,37 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         "scratchpad_update",
         json!({
             "scratchpad_id": scratchpad_id,
-            "remove_tags": ["planning"],
-            "expected_revision": 9
+            "remove_tags": ["planning"]
         }),
     )
     .await;
     assert_eq!(tagged["revision"], 10);
     let tags = call(&first, "scratchpad_list", json!({ "include_tags": true })).await;
     assert_eq!(tags["tags"], json!(["mcp", "shared"]));
+
+    let rejected_metadata = invoke(
+        &first,
+        "scratchpad_update",
+        json!({
+            "scratchpad_id": scratchpad_id,
+            "name": "This name must roll back",
+            "add_tags": [""],
+            "expected_revision": 10
+        }),
+    )
+    .await;
+    assert_error_code(&rejected_metadata, "invalid_scratchpad_input");
+    let after_rejected_metadata = call(
+        &first,
+        "scratchpad_read",
+        json!({ "scratchpad_id": scratchpad_id }),
+    )
+    .await;
+    assert_eq!(
+        after_rejected_metadata["scratchpad"]["name"],
+        "Delivery Plan"
+    );
+    assert_eq!(after_rejected_metadata["scratchpad"]["revision"], 10);
 
     let missing_strict = invoke(
         &first,
@@ -799,7 +821,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     let archived = call(
         &first,
         "scratchpad_update",
-        json!({ "scratchpad_id": scratchpad_id, "expected_revision": 11, "archived": true }),
+        json!({ "scratchpad_id": scratchpad_id, "archived": true }),
     )
     .await;
     assert_eq!(archived["revision"], 12);

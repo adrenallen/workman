@@ -9,8 +9,9 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use workman_core::{
-    Actor, NewTodo, ProjectId, Store, TodoCommentId, TodoId, TodoListQuery, TodoPriority,
-    TodoService, TodoServiceError, TodoSort, TodoStatus, TodoView, USER_ASSIGNEE, UpdateTodo,
+    Actor, MergedTodoUpdate, NewTodo, ProjectId, Store, TodoCommentId, TodoId, TodoListQuery,
+    TodoPriority, TodoService, TodoServiceError, TodoSort, TodoStatus, TodoView, USER_ASSIGNEE,
+    UpdateTodo,
 };
 
 use super::{WorkmanMcp, failure, now_millis, scoped_project, success};
@@ -367,66 +368,30 @@ impl WorkmanMcp {
         };
         let actor_label = actor_label(registry.store(), &actor);
         let service = TodoService::attributed(registry.store(), actor.id.clone());
-        let updated = match service.update(
+        match service.update_merged(
             project.id,
             args.todo_id,
-            UpdateTodo {
-                title: args.title,
-                body: args.body,
-                priority,
-                status,
-                tags: args.tags,
+            MergedTodoUpdate {
+                fields: UpdateTodo {
+                    title: args.title,
+                    body: args.body,
+                    priority,
+                    status,
+                    tags: args.tags,
+                },
+                assignee: args.assignee,
+                add_tags: args.add_tags.unwrap_or_default(),
+                remove_tags: args.remove_tags.unwrap_or_default(),
+                blocker_ids: args.blocker_ids,
+                add_blocker_ids: args.add_blocker_ids.unwrap_or_default(),
+                remove_blocker_ids: args.remove_blocker_ids.unwrap_or_default(),
             },
+            &actor_label,
             now_millis(),
         ) {
-            Ok(todo) => todo,
-            Err(error) => return todo_failure(error),
-        };
-        let mut todo = match args.assignee {
-            Some(assignee) => match service.assign(
-                project.id,
-                args.todo_id,
-                Some(assignee),
-                &actor_label,
-                now_millis(),
-            ) {
-                Ok(todo) => todo,
-                Err(error) => return todo_failure(error),
-            },
-            None => updated,
-        };
-        for tag in args.add_tags.unwrap_or_default() {
-            todo = match service.add_tag(project.id, args.todo_id, tag, now_millis()) {
-                Ok(todo) => todo,
-                Err(error) => return todo_failure(error),
-            };
+            Ok(todo) => todo_response(todo, args.response_mode),
+            Err(error) => todo_failure(error),
         }
-        for tag in args.remove_tags.unwrap_or_default() {
-            todo = match service.remove_tag(project.id, args.todo_id, tag, now_millis()) {
-                Ok(todo) => todo,
-                Err(error) => return todo_failure(error),
-            };
-        }
-        if let Some(blocker_ids) = args.blocker_ids {
-            todo = match service.set_blockers(project.id, args.todo_id, blocker_ids, now_millis()) {
-                Ok(todo) => todo,
-                Err(error) => return todo_failure(error),
-            };
-        }
-        for blocker_id in args.add_blocker_ids.unwrap_or_default() {
-            todo = match service.add_blocker(project.id, args.todo_id, blocker_id, now_millis()) {
-                Ok(todo) => todo,
-                Err(error) => return todo_failure(error),
-            };
-        }
-        for blocker_id in args.remove_blocker_ids.unwrap_or_default() {
-            todo = match service.remove_blocker(project.id, args.todo_id, blocker_id, now_millis())
-            {
-                Ok(todo) => todo,
-                Err(error) => return todo_failure(error),
-            };
-        }
-        todo_response(todo, args.response_mode)
     }
 
     #[tool(description = "Delete a project-scoped todo item")]

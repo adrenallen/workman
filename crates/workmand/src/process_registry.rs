@@ -1130,7 +1130,21 @@ impl ProcessRegistry {
         child_process_id: ProcessId,
         enabled: bool,
     ) -> RegistryResult<ProcessStatusView> {
-        let child = self.get(child_process_id)?;
+        self.update_process_for_spawner(requester_process_id, child_process_id, None, enabled)
+    }
+
+    /// Atomically rename a direct child and toggle its spawner notification setting.
+    pub fn update_process_for_spawner(
+        &mut self,
+        requester_process_id: ProcessId,
+        child_process_id: ProcessId,
+        new_name: Option<String>,
+        enabled: bool,
+    ) -> RegistryResult<ProcessStatusView> {
+        if let Some(new_name) = &new_name {
+            validate_name(new_name)?;
+        }
+        let mut child = self.get(child_process_id)?;
         let requester = self.get(requester_process_id)?;
         if child.kind != ProcessKind::Agent {
             return Err(RegistryError::SpawnerNotificationRequiresAgent(
@@ -1163,12 +1177,16 @@ impl ProcessRegistry {
                 .latest_completion(child_process_id)?
                 .map_or(0, |completion| completion.id);
         }
-        self.store.set_spawner_idle_notification(
+        self.store.update_process_and_spawner_notification(
             child_process_id,
+            new_name.as_deref(),
             enabled,
             now_millis(),
             baseline_completion_id,
         )?;
+        if let Some(new_name) = new_name {
+            child.name = new_name;
+        }
         self.status_invalidations.invalidate();
         self.status_view(child)
     }

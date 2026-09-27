@@ -267,10 +267,21 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
     let error = rejected(
         &first_child,
         "update_process",
-        json!({ "process_id": second_child_id, "notify_spawner_on_idle": true }),
+        json!({
+            "process_id": second_child_id,
+            "new_name": "must-not-be-renamed",
+            "notify_spawner_on_idle": true
+        }),
     )
     .await;
     assert_eq!(error["code"], "not_process_spawner");
+    let unchanged = call(
+        &parent,
+        "get_process_status",
+        json!({ "process_id": second_child_id }),
+    )
+    .await;
+    assert_eq!(unchanged["name"], "second-child");
 
     let terminal_spawn = call(
         &parent,

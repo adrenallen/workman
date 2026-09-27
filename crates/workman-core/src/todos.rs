@@ -185,6 +185,17 @@ pub struct UpdateTodo {
     pub tags: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MergedTodoUpdate {
+    pub fields: UpdateTodo,
+    pub assignee: Option<String>,
+    pub add_tags: Vec<String>,
+    pub remove_tags: Vec<String>,
+    pub blocker_ids: Option<Vec<TodoId>>,
+    pub add_blocker_ids: Vec<TodoId>,
+    pub remove_blocker_ids: Vec<TodoId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TodoServiceError {
     Store(String),
@@ -379,6 +390,163 @@ impl<'store> TodoService<'store> {
         }
         if let Some(tags) = tags {
             replace_tags(&transaction, todo_id, &tags)?;
+        }
+        transaction.commit()?;
+        self.require_todo(project_id, todo_id, now_ms)
+    }
+
+    /// Apply the MCP's consolidated todo mutation as one validated transaction.
+    pub fn update_merged(
+        &self,
+        project_id: ProjectId,
+        todo_id: TodoId,
+        mutation: MergedTodoUpdate,
+        assignment_actor: &str,
+        now_ms: i64,
+    ) -> TodoServiceResult<TodoView> {
+        let current = self.require_todo(project_id, todo_id, now_ms)?;
+        let MergedTodoUpdate {
+            fields,
+            assignee,
+            add_tags,
+            remove_tags,
+            blocker_ids,
+            add_blocker_ids,
+            remove_blocker_ids,
+        } = mutation;
+        if let Some(title) = &fields.title {
+            validate_title(title)?;
+        }
+
+        let tags_changed = fields.tags.is_some() || !add_tags.is_empty() || !remove_tags.is_empty();
+        let mut final_tags = fields
+            .tags
+            .clone()
+            .map(normalize_tags)
+            .transpose()?
+            .unwrap_or_else(|| current.tags.clone());
+        let additions = add_tags
+            .into_iter()
+            .map(normalize_tag)
+            .collect::<TodoServiceResult<Vec<_>>>()?;
+        let removals = remove_tags
+            .into_iter()
+            .map(normalize_tag)
+            .collect::<TodoServiceResult<Vec<_>>>()?;
+        for tag in additions {
+            if !final_tags.contains(&tag) {
+                final_tags.push(tag);
+            }
+        }
+        final_tags.retain(|tag| !removals.contains(tag));
+
+        let normalized_assignee = assignee
+            .map(|assignee| normalize_assignee(Some(assignee)))
+            .transpose()?;
+
+        let blockers_changed =
+            blocker_ids.is_some() || !add_blocker_ids.is_empty() || !remove_blocker_ids.is_empty();
+        let replacement_blockers = blocker_ids.map(deduplicate_ids);
+        if let Some(blocker_ids) = &replacement_blockers {
+            for blocker_id in blocker_ids {
+                self.validate_blocker(project_id, todo_id, *blocker_id, now_ms)?;
+            }
+        }
+        let additions = deduplicate_ids(add_blocker_ids);
+        for blocker_id in &additions {
+            self.validate_blocker(project_id, todo_id, *blocker_id, now_ms)?;
+        }
+        let removals = deduplicate_ids(remove_blocker_ids);
+        let mut final_blockers =
+            replacement_blockers.unwrap_or_else(|| current.blocker_ids.clone());
+        for blocker_id in additions {
+            if !final_blockers.contains(&blocker_id) {
+                final_blockers.push(blocker_id);
+            }
+        }
+        final_blockers.retain(|blocker_id| !removals.contains(blocker_id));
+
+        let notification_title = fields
+            .title
+            .clone()
+            .unwrap_or_else(|| current.title.clone());
+        let transaction = self.store.connection().unchecked_transaction()?;
+        if let Some(title) = fields.title {
+            transaction.execute(
+                "UPDATE todos SET title = ?1 WHERE id = ?2",
+                params![title, todo_id],
+            )?;
+        }
+        if let Some(body) = fields.body {
+            transaction.execute(
+                "UPDATE todos SET body = ?1 WHERE id = ?2",
+                params![body, todo_id],
+            )?;
+        }
+        if let Some(priority) = fields.priority {
+            transaction.execute(
+                "UPDATE todos SET priority = ?1 WHERE id = ?2",
+                params![priority, todo_id],
+            )?;
+        }
+        if let Some(status) = fields.status {
+            let completed = status == TodoStatus::Completed;
+            transaction.execute(
+                "UPDATE todos SET status = ?1, completed = ?2 WHERE id = ?3",
+                params![status, completed, todo_id],
+            )?;
+            if status != current.status {
+                let kind = if completed {
+                    Some(TodoActivityKind::Completed)
+                } else if current.status == TodoStatus::Completed {
+                    Some(TodoActivityKind::Reopened)
+                } else {
+                    None
+                };
+                if let Some(kind) = kind {
+                    transaction.execute(
+                        "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![todo_id, self.write_actor("workman"), kind.as_str(), now_ms],
+                    )?;
+                }
+            }
+        }
+        if tags_changed {
+            replace_tags(&transaction, todo_id, &final_tags)?;
+        }
+        if let Some(assignee) = normalized_assignee
+            && current.assignee != assignee
+        {
+            transaction.execute(
+                "UPDATE todos SET assignee = ?1 WHERE id = ?2 AND project_id = ?3",
+                params![assignee.as_deref(), todo_id, project_id],
+            )?;
+            if assignee.as_deref() == Some(USER_ASSIGNEE) {
+                let actor = assignment_actor.trim();
+                let actor = if actor.is_empty() { "Workman" } else { actor };
+                transaction.execute(
+                    "INSERT INTO notifications
+                        (type, project_id, todo_id, body, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        NotificationType::TodoAssignedToYou.as_str(),
+                        project_id,
+                        todo_id,
+                        format!("{actor} assigned ‘{notification_title}’ to you."),
+                        now_ms,
+                    ],
+                )?;
+            }
+        }
+        if blockers_changed {
+            transaction.execute("DELETE FROM todo_blockers WHERE todo_id = ?1", [todo_id])?;
+            for blocker_id in final_blockers {
+                transaction.execute(
+                    "INSERT INTO todo_blockers (todo_id, blocked_by_todo_id) VALUES (?1, ?2)",
+                    params![todo_id, blocker_id],
+                )?;
+            }
         }
         transaction.commit()?;
         self.require_todo(project_id, todo_id, now_ms)
