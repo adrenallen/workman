@@ -15,23 +15,12 @@ pub(crate) struct Completion {
 #[derive(Debug)]
 pub enum CompletionLedgerError {
     Store(StoreError),
-    CompletionProcessMismatch {
-        completion_id: i64,
-        process_id: ProcessId,
-    },
 }
 
 impl fmt::Display for CompletionLedgerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => error.fmt(formatter),
-            Self::CompletionProcessMismatch {
-                completion_id,
-                process_id,
-            } => write!(
-                formatter,
-                "completion {completion_id} does not belong to process {process_id}"
-            ),
         }
     }
 }
@@ -40,7 +29,6 @@ impl Error for CompletionLedgerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
-            Self::CompletionProcessMismatch { .. } => None,
         }
     }
 }
@@ -69,7 +57,7 @@ impl<'a> CompletionLedger<'a> {
         Self { store }
     }
 
-    /// Attribute one successfully delivered input to the process that sent it.
+    /// Attribute one successfully queued line submission to the process that sent it.
     pub(crate) fn record_input(
         &self,
         owner_process_id: ProcessId,
@@ -87,77 +75,68 @@ impl<'a> CompletionLedger<'a> {
         Ok(())
     }
 
-    /// Observe one authoritative attention snapshot and record a completed turn once.
+    /// Observe one authoritative attention snapshot and record a completed work episode once.
     ///
-    /// A completion requires an idle snapshot plus attention-relevant output at or after the
-    /// submitted input. Merely queuing or typing a prompt therefore cannot create a completion.
+    /// A completion requires an idle snapshot with no queued prompt plus eager evidence of work
+    /// after the submitted input. Evidence is either an adapter-recognized busy state or, for an
+    /// adapter without busy detection, PTY output observed after the recent-input grace period.
+    /// A newer work-evidence timestamp permits a later completion for the same input, so a real
+    /// turn end supersedes a transient mid-turn idle observation.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_process(
         &self,
         process_id: ProcessId,
         state: AttentionState,
         last_input_at: Option<i64>,
-        last_output_at: Option<i64>,
+        work_evidence_at: Option<i64>,
+        has_pending_prompts: bool,
         observed_at_ms: i64,
     ) -> CompletionLedgerResult<Option<Completion>> {
-        let observed_state = match state {
-            AttentionState::Working => "working",
-            AttentionState::Idle | AttentionState::Waiting => "idle",
-            AttentionState::NeedsInput | AttentionState::Exited => "other",
+        if has_pending_prompts || !matches!(state, AttentionState::Idle | AttentionState::Waiting) {
+            return Ok(None);
+        }
+        let Some((input_at, work_evidence_at)) = last_input_at.zip(work_evidence_at) else {
+            return Ok(None);
         };
-        let previous_completed_input = self
+        let previous_completion = self
             .store
             .connection()
             .query_row(
-                "SELECT last_completed_input_at
+                "SELECT last_completed_input_at, last_completed_work_evidence_at
                  FROM process_completion_observations WHERE process_id = ?1",
                 [process_id],
-                |row| row.get::<_, Option<i64>>(0),
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
-            .optional()?
-            .flatten();
-
-        let completed_input = if observed_state == "idle" {
-            last_input_at.filter(|input_at| {
-                last_output_at.is_some_and(|output_at| output_at >= *input_at)
-                    && previous_completed_input != Some(*input_at)
-            })
-        } else {
-            None
-        };
+            .optional()?;
+        if previous_completion == Some((Some(input_at), Some(work_evidence_at))) {
+            return Ok(None);
+        }
 
         let transaction = self.store.connection().unchecked_transaction()?;
         transaction.execute(
             "INSERT INTO process_completion_observations
-                (process_id, observed_state, last_input_at, last_completed_input_at)
-             VALUES (?1, ?2, ?3, ?4)
+                (process_id, last_completed_input_at, last_completed_work_evidence_at)
+             VALUES (?1, ?2, ?3)
              ON CONFLICT(process_id) DO UPDATE SET
-                observed_state = excluded.observed_state,
-                last_input_at = excluded.last_input_at,
-                last_completed_input_at = COALESCE(
-                    excluded.last_completed_input_at,
-                    process_completion_observations.last_completed_input_at
-                )",
-            params![process_id, observed_state, last_input_at, completed_input],
+                last_completed_input_at = excluded.last_completed_input_at,
+                last_completed_work_evidence_at = excluded.last_completed_work_evidence_at",
+            params![process_id, input_at, work_evidence_at],
         )?;
-        let completion = if let Some(input_at) = completed_input {
-            transaction.execute(
-                "INSERT OR IGNORE INTO process_completions
-                    (process_id, input_at, completed_at)
-                 VALUES (?1, ?2, ?3)",
-                params![process_id, input_at, observed_at_ms],
-            )?;
-            transaction
-                .query_row(
-                    "SELECT id, process_id, completed_at
-                     FROM process_completions
-                     WHERE process_id = ?1 AND input_at = ?2",
-                    params![process_id, input_at],
-                    completion_from_row,
-                )
-                .optional()?
-        } else {
-            None
-        };
+        transaction.execute(
+            "INSERT OR IGNORE INTO process_completions
+                (process_id, input_at, work_evidence_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![process_id, input_at, work_evidence_at, observed_at_ms],
+        )?;
+        let completion = transaction
+            .query_row(
+                "SELECT id, process_id, completed_at
+                 FROM process_completions
+                 WHERE process_id = ?1 AND input_at = ?2 AND work_evidence_at = ?3",
+                params![process_id, input_at, work_evidence_at],
+                completion_from_row,
+            )
+            .optional()?;
         transaction.commit()?;
         Ok(completion)
     }
@@ -238,10 +217,10 @@ impl<'a> CompletionLedger<'a> {
             |row| row.get::<_, bool>(0),
         )?;
         if !belongs_to_process {
-            return Err(CompletionLedgerError::CompletionProcessMismatch {
-                completion_id,
-                process_id,
-            });
+            // The watched process (and therefore its completion) may have been
+            // deleted after delivery was queued. Reporting is bookkeeping, so
+            // a vanished target is an idempotent no-op rather than a failure.
+            return Ok(false);
         }
         let changed = self.store.connection().execute(
             "INSERT INTO process_completion_reports
@@ -346,7 +325,7 @@ mod tests {
             ledger.record_input(1, 3, 100).unwrap();
             ledger.record_input(2, 3, 100).unwrap();
             let completion = ledger
-                .observe_process(3, AttentionState::Idle, Some(101), Some(105), 110)
+                .observe_process(3, AttentionState::Idle, Some(101), Some(105), false, 110)
                 .unwrap()
                 .unwrap();
             assert_eq!(
@@ -380,17 +359,61 @@ mod tests {
     }
 
     #[test]
-    fn prompt_without_new_output_is_not_a_completion() {
+    fn prompt_without_work_evidence_is_not_a_completion() {
         let store = Store::open_in_memory().unwrap();
         put_fixture(&store);
         let ledger = CompletionLedger::new(&store);
         ledger.record_input(1, 3, 200).unwrap();
         assert!(
             ledger
-                .observe_process(3, AttentionState::Idle, Some(201), Some(199), 300)
+                .observe_process(3, AttentionState::Idle, Some(201), None, false, 300)
                 .unwrap()
                 .is_none()
         );
         assert!(ledger.unreported_completions(1, &[3]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn later_work_evidence_supersedes_an_early_completion_for_the_same_input() {
+        let store = Store::open_in_memory().unwrap();
+        put_fixture(&store);
+        let ledger = CompletionLedger::new(&store);
+        ledger.record_input(1, 3, 100).unwrap();
+
+        let early = ledger
+            .observe_process(3, AttentionState::Idle, Some(101), Some(110), false, 200)
+            .unwrap()
+            .unwrap();
+        ledger.mark_completion_reported(1, 3, early.id).unwrap();
+        assert!(
+            ledger
+                .observe_process(3, AttentionState::Idle, Some(101), Some(110), false, 250)
+                .unwrap()
+                .is_none()
+        );
+
+        let final_completion = ledger
+            .observe_process(3, AttentionState::Idle, Some(101), Some(300), false, 400)
+            .unwrap()
+            .unwrap();
+        assert!(final_completion.id > early.id);
+        assert_eq!(
+            ledger.unreported_completions(1, &[3]).unwrap(),
+            vec![final_completion]
+        );
+    }
+
+    #[test]
+    fn pending_prompt_and_deleted_completion_are_safe_no_ops() {
+        let store = Store::open_in_memory().unwrap();
+        put_fixture(&store);
+        let ledger = CompletionLedger::new(&store);
+        assert!(
+            ledger
+                .observe_process(3, AttentionState::Idle, Some(100), Some(120), true, 200)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!ledger.mark_completion_reported(1, 3, 999).unwrap());
     }
 }

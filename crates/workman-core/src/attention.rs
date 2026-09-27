@@ -103,6 +103,11 @@ pub struct AdapterObservation<'a> {
 pub trait ToolAttentionAdapter: Send + Sync {
     fn inspect(&self, observation: AdapterObservation<'_>) -> AdapterFlags;
 
+    /// Whether this adapter can positively identify an active work episode.
+    fn detects_busy(&self) -> bool {
+        false
+    }
+
     /// Text used to distinguish meaningful output from a cosmetic redraw.
     /// Adapters may remove known decorations while preserving transcript and draft text.
     fn activity_text<'a>(&self, rendered: &'a str) -> Cow<'a, str> {
@@ -161,6 +166,11 @@ pub struct AgentState {
     /// Raw pending timers/watches used to derive `waiting`.
     #[serde(default)]
     pub waiting_on: Vec<AgentWaitingReason>,
+    /// Eager, in-memory evidence that this input produced real work. This is
+    /// intentionally omitted from the public status payload; completion
+    /// consumers use [`Self::work_evidence_at`] instead.
+    #[serde(skip)]
+    work_evidence_at: Option<i64>,
 }
 
 impl AgentState {
@@ -173,6 +183,7 @@ impl AgentState {
         last_output_at: Option<i64>,
         last_content_change_at: Option<i64>,
         last_input_at: Option<i64>,
+        work_evidence_at: Option<i64>,
         flags: &AdapterFlags,
     ) -> Self {
         let idle_since = last_output_at.unwrap_or(started_at);
@@ -209,7 +220,13 @@ impl AgentState {
             last_input_seconds: last_input_at.map(|at| elapsed_seconds(now_ms, at)),
             classification: flags.classification.clone(),
             waiting_on: Vec::new(),
+            work_evidence_at,
         }
+    }
+
+    /// Timestamp of the newest eagerly observed work evidence for the current input.
+    pub const fn work_evidence_at(&self) -> Option<i64> {
+        self.work_evidence_at
     }
 
     /// Refine an idle snapshot with durable timer state without weakening
@@ -243,6 +260,7 @@ impl AgentState {
             None,
             None,
             None,
+            None,
             &AdapterFlags::default(),
         )
     }
@@ -272,6 +290,7 @@ struct AttentionEngine {
     last_output_at: Option<i64>,
     last_content_change_at: Option<i64>,
     last_input_at: Option<i64>,
+    work_evidence_at: Option<i64>,
     last_rendered: String,
     last_alternate_screen: bool,
     flags: AdapterFlags,
@@ -299,6 +318,7 @@ impl AttentionEngine {
             rendered,
             alternate_screen,
         });
+        let detects_busy = self.adapter.detects_busy();
         let activity_text = self.adapter.activity_text(rendered);
         let content_changed =
             activity_text != self.last_rendered || alternate_screen != self.last_alternate_screen;
@@ -306,9 +326,10 @@ impl AttentionEngine {
         if explicit_attention {
             self.idle_prompt_latched = false;
         }
-        let attention_neutral = self
+        let ui_attention_neutral = self
             .attention_neutral_until
-            .is_some_and(|until| now_ms <= until)
+            .is_some_and(|until| now_ms <= until);
+        let attention_neutral = ui_attention_neutral
             || (self.idle_prompt_latched && !explicit_attention)
             // Resting composers can repaint continuously before the first idle
             // snapshot. These frames must not keep restarting its confirmation.
@@ -316,6 +337,17 @@ impl AttentionEngine {
                 && self.flags.resting_prompt
                 && !explicit_attention
                 && !content_changed);
+        if let Some(input_at) = self.last_input_at
+            && !ui_attention_neutral
+            && (flags.busy
+                || (!detects_busy
+                    && now_ms >= input_at.saturating_add(duration_millis(RECENT_INPUT_GRACE))))
+        {
+            // This is updated on every qualifying work episode/output chunk.
+            // A later episode for the same input can therefore supersede a
+            // completion recorded during a transient mid-turn idle frame.
+            self.work_evidence_at = Some(now_ms);
+        }
         if !attention_neutral {
             self.last_output_at = Some(now_ms);
         }
@@ -343,6 +375,7 @@ impl AttentionEngine {
             self.last_output_at,
             self.last_content_change_at,
             self.last_input_at,
+            self.work_evidence_at,
             &self.flags,
         )
     }
@@ -483,6 +516,7 @@ impl AttentionTracker {
                 last_output_at: None,
                 last_content_change_at: None,
                 last_input_at: None,
+                work_evidence_at: None,
                 last_rendered: String::new(),
                 last_alternate_screen: false,
                 flags: AdapterFlags::default(),
@@ -547,6 +581,7 @@ impl AttentionTracker {
         let next_transition_at = {
             let mut engine = self.lock();
             engine.last_input_at = Some(now_ms);
+            engine.work_evidence_at = None;
             engine.idle_prompt_latched = false;
             engine.next_transition_at(now_ms)
         };
@@ -654,6 +689,7 @@ impl fmt::Debug for AttentionTracker {
             .field("last_output_at", &engine.last_output_at)
             .field("last_content_change_at", &engine.last_content_change_at)
             .field("last_input_at", &engine.last_input_at)
+            .field("work_evidence_at", &engine.work_evidence_at)
             .field("flags", &engine.flags)
             .field("exited", &engine.exited)
             .finish()
@@ -685,6 +721,10 @@ fn duration_millis(duration: Duration) -> i64 {
 pub struct ClaudeCodeAdapter;
 
 impl ToolAttentionAdapter for ClaudeCodeAdapter {
+    fn detects_busy(&self) -> bool {
+        true
+    }
+
     fn inspect(&self, observation: AdapterObservation<'_>) -> AdapterFlags {
         let rendered = observation.rendered;
         let lowercase = rendered.to_lowercase();
@@ -768,6 +808,10 @@ impl ToolAttentionAdapter for ClaudeCodeAdapter {
 pub struct CodexAdapter;
 
 impl ToolAttentionAdapter for CodexAdapter {
+    fn detects_busy(&self) -> bool {
+        true
+    }
+
     fn activity_text<'a>(&self, rendered: &'a str) -> Cow<'a, str> {
         codex_activity_text(rendered)
     }
@@ -839,6 +883,10 @@ impl ToolAttentionAdapter for CodexAdapter {
 pub struct GrokAdapter;
 
 impl ToolAttentionAdapter for GrokAdapter {
+    fn detects_busy(&self) -> bool {
+        true
+    }
+
     fn inspect(&self, observation: AdapterObservation<'_>) -> AdapterFlags {
         let rendered = observation.rendered;
         let lowercase = rendered.to_lowercase();
