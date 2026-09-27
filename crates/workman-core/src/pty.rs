@@ -604,9 +604,14 @@ impl PtyInputHandle {
             .last_input
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+        let viewport = self.terminal_output.read_viewport();
+        let composer = composer_draft(&viewport.rows);
         let submits_prompt =
-            user_frame_is_submission(&self.typing_activity.bracketed_paste_active, bytes);
-        if submits_prompt {
+            user_frame_is_submission(&self.typing_activity.bracketed_paste_active, bytes)
+                && !(bytes == b"\r" && composer.draft_ends_with_backslash);
+        let defer_recognized_enter_clear =
+            bytes == b"\r" && !matches!(composer.state, ComposerDraftState::Unknown);
+        if submits_prompt && !defer_recognized_enter_clear {
             self.typing_activity
                 .unsent_human_draft
                 .store(false, Ordering::Release);
@@ -1465,7 +1470,7 @@ fn user_frame_is_submission(bracketed_paste_active: &AtomicBool, bytes: &[u8]) -
         && !saw_paste_boundary
         && matches!(
             bytes,
-            b"\r" | b"\n" | b"\x1b[13u" | b"\x1b[13;1u" | b"\x1b[27;1;13~"
+            b"\r" | b"\x1b[13u" | b"\x1b[13;1u" | b"\x1b[27;1;13~"
         )
 }
 
@@ -1502,7 +1507,76 @@ fn is_composer_placeholder(marker: char, draft: &str) -> bool {
         )
 }
 
+fn opencode_composer_draft(rows: &[crate::terminal::RenderedRow]) -> Option<ComposerDraft> {
+    for border_index in (0..rows.len()).rev() {
+        let border = rows[border_index].text.trim_start();
+        if !border.starts_with("╹▀") || border_index == 0 {
+            continue;
+        }
+
+        let mut rail_rows = Vec::new();
+        let mut index = border_index;
+        while index > 0 {
+            let candidate = &rows[index - 1];
+            let Some(rail_cell) = candidate
+                .cells
+                .iter()
+                .position(|cell| !cell.character.is_whitespace())
+                .filter(|offset| candidate.cells[*offset].character == '┃')
+            else {
+                break;
+            };
+            rail_rows.push((candidate, rail_cell));
+            index -= 1;
+        }
+        if rail_rows.is_empty() {
+            continue;
+        }
+        rail_rows.reverse();
+        // OpenCode's last rail is agent/model metadata, not editable composer content.
+        rail_rows.pop();
+
+        let mut draft = rail_rows
+            .into_iter()
+            .map(|(row, rail_cell)| visible_composer_text(row, rail_cell + 1, false))
+            .collect::<Vec<_>>()
+            .join("\n");
+        draft = draft.trim().to_owned();
+        let normalized = draft.split_whitespace().collect::<Vec<_>>().join(" ");
+        let placeholder = [
+            "Ask anything…",
+            "Ask anything...",
+            "Run a command…",
+            "Run a command...",
+        ]
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix));
+        return Some(ComposerDraft {
+            state: if draft.is_empty() || placeholder {
+                ComposerDraftState::Empty
+            } else {
+                ComposerDraftState::NonEmpty
+            },
+            draft_ends_with_backslash: draft.ends_with('\\'),
+        });
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ComposerDraft {
+    state: ComposerDraftState,
+    draft_ends_with_backslash: bool,
+}
+
 fn composer_draft_state(rows: &[crate::terminal::RenderedRow]) -> ComposerDraftState {
+    composer_draft(rows).state
+}
+
+fn composer_draft(rows: &[crate::terminal::RenderedRow]) -> ComposerDraft {
+    if let Some(draft) = opencode_composer_draft(rows) {
+        return draft;
+    }
     for (index, row) in rows.iter().enumerate().rev() {
         let Some((marker_cell, marker)) = row
             .cells
@@ -1517,7 +1591,10 @@ fn composer_draft_state(rows: &[crate::terminal::RenderedRow]) -> ComposerDraftS
         };
         let mut draft = visible_composer_text(row, marker_cell + 1, marker == '›');
         if marker == '❯' && crate::attention::is_claude_dialog_choice(draft.trim()) {
-            return ComposerDraftState::Unknown;
+            return ComposerDraft {
+                state: ComposerDraftState::Unknown,
+                draft_ends_with_backslash: false,
+            };
         }
         let mut wrapped = row.wrapped;
         let mut continuation = index + 1;
@@ -1528,13 +1605,20 @@ fn composer_draft_state(rows: &[crate::terminal::RenderedRow]) -> ComposerDraftS
             continuation += 1;
         }
         let draft = draft.trim();
-        return if draft.is_empty() || is_composer_placeholder(marker, draft) {
+        let state = if draft.is_empty() || is_composer_placeholder(marker, draft) {
             ComposerDraftState::Empty
         } else {
             ComposerDraftState::NonEmpty
         };
+        return ComposerDraft {
+            state,
+            draft_ends_with_backslash: draft.ends_with('\\'),
+        };
     }
-    ComposerDraftState::Unknown
+    ComposerDraft {
+        state: ComposerDraftState::Unknown,
+        draft_ends_with_backslash: false,
+    }
 }
 
 fn framed_submission_content(content: &[u8], bracketed_paste: bool) -> Vec<u8> {
@@ -2887,6 +2971,9 @@ mod tests {
         assert_eq!(writes.recv().unwrap().0, b"submitted");
         assert!(input.write_user_input(b"\r").unwrap());
         assert_eq!(writes.recv().unwrap().0, b"\r");
+        assert!(input.has_unsent_human_draft());
+        terminal.feed_with_replies("\r\x1b[2K❯ ".as_bytes());
+        thread::sleep(Duration::from_millis(510));
         assert!(!input.has_unsent_human_draft());
         assert!(input.set_notification_held_by_draft(true));
         assert!(input.notification_held_by_draft());
@@ -2918,6 +3005,32 @@ mod tests {
             }
             terminal.feed_with_replies("\x1b[2J\x1b[H❯ unsent draft".as_bytes());
             assert!(input.has_unsent_human_draft());
+            drop(input);
+            attention.mark_exited();
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn ctrl_j_and_backslash_enter_keep_recognized_composer_drafts_armed() {
+        for (rendered_before, key, rendered_after) in [
+            ("❯ line one", b"\n".as_slice(), "❯ line one\n  line two"),
+            ("❯ line one\\", b"\r".as_slice(), "❯ line one\n  line two"),
+        ] {
+            let terminal = TerminalOutput::new(24, 80, 100);
+            let attention = AttentionTracker::new(Some("claude_code".into()));
+            let (input, writes, task, _) =
+                submission_fixture_for(terminal.clone(), attention.clone());
+            input.set_typing_idle_delay(Duration::ZERO);
+            input.write_user_input(b"line one").unwrap();
+            assert_eq!(writes.recv().unwrap().0, b"line one");
+            terminal.feed_with_replies(format!("\x1b[2J\x1b[H{rendered_before}").as_bytes());
+
+            assert!(!input.write_user_input(key).unwrap());
+            assert_eq!(writes.recv().unwrap().0, key);
+            terminal.feed_with_replies(format!("\x1b[2J\x1b[H{rendered_after}").as_bytes());
+            assert!(input.has_unsent_human_draft());
+
             drop(input);
             attention.mark_exited();
             task.join().unwrap();
@@ -2970,6 +3083,58 @@ mod tests {
             attention.mark_exited();
             task.join().unwrap();
         }
+    }
+
+    #[test]
+    fn opencode_fixture_composers_distinguish_empty_draft_and_busy_draft() {
+        const RESTING: &str = include_str!("../tests/fixtures/attention/opencode_resting.txt");
+        const DRAFT: &str = include_str!("../tests/fixtures/attention/opencode_draft.txt");
+        const WORKING: &str = include_str!("../tests/fixtures/attention/opencode_working.txt");
+
+        let state = |rendered: &str| {
+            let terminal = TerminalOutput::new(35, 180, 100);
+            terminal.feed_with_replies(format!("\x1b[2J\x1b[H{rendered}").as_bytes());
+            composer_draft_state(&terminal.read_viewport().rows)
+        };
+
+        assert_eq!(state(RESTING), ComposerDraftState::Empty);
+        assert_eq!(state(DRAFT), ComposerDraftState::NonEmpty);
+        assert_eq!(state(WORKING), ComposerDraftState::Empty);
+        assert_eq!(
+            state(&RESTING.replacen("Ask anything…", "Run a command…", 1)),
+            ComposerDraftState::Empty
+        );
+
+        let working_draft = WORKING.replacen(
+            "  ┃\n  ┃\n  ┃  Build auto",
+            "  ┃\n  ┃  draft typed while the agent works\n  ┃  Build auto",
+            1,
+        );
+        assert_ne!(working_draft, WORKING, "working fixture shape changed");
+        assert_eq!(state(&working_draft), ComposerDraftState::NonEmpty);
+
+        fn guard_holds(rendered: &str) -> bool {
+            let terminal = TerminalOutput::new(35, 180, 100);
+            let attention = AttentionTracker::new(Some("opencode".into()));
+            let (input, writes, task, _) =
+                submission_fixture_for(terminal.clone(), attention.clone());
+            input.set_typing_idle_delay(Duration::ZERO);
+            input.write_user_input(b"x").unwrap();
+            writes.recv().unwrap();
+            terminal.feed_with_replies(format!("\x1b[2J\x1b[H{rendered}").as_bytes());
+            *input.typing_activity.last_input.lock().unwrap() =
+                Some(Instant::now() - Duration::from_secs(1));
+            let held = input.has_unsent_human_draft();
+            drop(input);
+            attention.mark_exited();
+            task.join().unwrap();
+            held
+        }
+
+        assert!(!guard_holds(RESTING));
+        assert!(guard_holds(DRAFT));
+        assert!(!guard_holds(WORKING));
+        assert!(guard_holds(&working_draft));
     }
 
     #[test]

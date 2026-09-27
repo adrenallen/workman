@@ -7,7 +7,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -18,7 +18,7 @@ use workman_core::{
     ProcessStatus, ProjectId, Store, StoreError, TimerKind,
     attention::{
         AgentState, AgentWaitingProcess, AgentWaitingReason, AttentionState, AttentionTracker,
-        PendingDialog, PendingPrompt, pending_dialog,
+        PendingDialog, PendingPrompt, RECENT_INPUT_GRACE, pending_dialog,
     },
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyInputHandle, PtyProcess,
@@ -40,6 +40,66 @@ const SUBMIT_MAX_ATTEMPTS: usize = 3;
 const KIMI_INITIAL_PROMPT_KEY_DELAY: Duration = Duration::from_millis(150);
 const KIMI_INITIAL_PROMPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
 const KIMI_INITIAL_PROMPT_MAX_ATTEMPTS: usize = 2;
+const OPENCODE_MISSING_BUSY_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+fn missing_opencode_busy_input(state: &AgentState) -> Option<i64> {
+    if state.state != AttentionState::Idle || state.work_evidence_at().is_some() {
+        return None;
+    }
+    let normalized_tool_type = state
+        .tool_type
+        .as_deref()?
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_");
+    if !matches!(normalized_tool_type.as_str(), "opencode" | "open_code") {
+        return None;
+    }
+    let input_at = state.last_input_at?;
+    let output_at = state.last_output_at?;
+    let grace_ms = RECENT_INPUT_GRACE
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX);
+    (output_at >= input_at.saturating_add(grace_ms)).then_some(input_at)
+}
+
+fn should_log_opencode_missing_busy(
+    logged: &mut HashMap<ProcessId, (i64, i64)>,
+    process_id: ProcessId,
+    input_at: i64,
+    now_ms: i64,
+) -> bool {
+    if let Some((last_log_at, last_input_at)) = logged.get(&process_id)
+        && (*last_input_at == input_at
+            || now_ms.saturating_sub(*last_log_at)
+                < i64::try_from(OPENCODE_MISSING_BUSY_LOG_INTERVAL.as_millis()).unwrap_or(i64::MAX))
+    {
+        return false;
+    }
+    logged.insert(process_id, (now_ms, input_at));
+    true
+}
+
+fn maybe_log_opencode_missing_busy(process: &Process, state: &AgentState, now_ms: i64) {
+    let Some(input_at) = missing_opencode_busy_input(state) else {
+        return;
+    };
+    static LOGGED: OnceLock<Mutex<HashMap<ProcessId, (i64, i64)>>> = OnceLock::new();
+    let mut logged = LOGGED
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !should_log_opencode_missing_busy(&mut logged, process.id, input_at, now_ms) {
+        return;
+    }
+    eprintln!(
+        "workman attention warning: process {} ({}) tool_type={} reached idle after post-grace PTY output without an OpenCode busy footer (`esc interrupt` or `esc again to interrupt`); the OpenCode UI markers may have changed",
+        process.id,
+        process.name,
+        state.tool_type.as_deref().unwrap_or("opencode"),
+    );
+}
 
 use crate::agent_sessions::SessionCapture;
 use crate::completion_ledger::{CompletionLedger, CompletionLedgerError};
@@ -988,6 +1048,7 @@ impl ProcessRegistry {
             .get(&process.id)
             .map(|output| output.attention.snapshot())
             .unwrap_or_else(|| AgentState::exited(tool_type, process.exited_at));
+        maybe_log_opencode_missing_busy(&process, &agent_state, observed_at);
         let idle_watch = self.store.process_idle_watch_enabled(process.id)?;
         let idle_alert_fired = idle_watch
             && self.store.observe_process_idle_watch(
@@ -2063,6 +2124,29 @@ impl ProcessRegistry {
         Ok(pending_dialog(&rendered, status.classification.as_deref()))
     }
 
+    /// Return a recognized dialog reduced to its visible question/choice region.
+    ///
+    /// This intentionally excludes retained scrollback and unrelated viewport rows so callers
+    /// can build stable episode identities without copying or hashing the full terminal buffer.
+    pub(crate) fn pending_dialog_viewport(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<Option<PendingDialog>> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        let Some(output) = self.outputs.get(&process_id) else {
+            return Ok(None);
+        };
+        let rendered = output.terminal.read_viewport().text();
+        let status = output.attention.snapshot();
+        Ok(
+            pending_dialog(&rendered, status.classification.as_deref()).map(|mut dialog| {
+                dialog.rendered = normalized_dialog_region(&rendered);
+                dialog
+            }),
+        )
+    }
+
     /// Acknowledge a narrowly known first-run trust dialog with Enter.
     pub fn acknowledge_known_dialog(
         &mut self,
@@ -2787,6 +2871,100 @@ impl ProcessRegistry {
     }
 }
 
+fn normalized_dialog_region(rendered: &str) -> String {
+    let lines = rendered
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>();
+    let nonempty = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.is_empty())
+        .collect::<Vec<_>>();
+    let choices = nonempty
+        .iter()
+        .filter(|(_, line)| is_dialog_choice_row(line))
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    if nonempty.is_empty() {
+        return String::new();
+    }
+
+    let (start, end) = if let (Some(first_choice), Some(last_choice)) =
+        (choices.first().copied(), choices.last().copied())
+    {
+        let start = nonempty
+            .iter()
+            .rev()
+            .find(|(index, line)| {
+                *index < first_choice
+                    && first_choice.saturating_sub(*index) <= 10
+                    && is_dialog_question_row(line)
+            })
+            .map_or(first_choice, |(index, _)| *index);
+        (start, last_choice)
+    } else if let Some((anchor, _)) = nonempty
+        .iter()
+        .rev()
+        .find(|(_, line)| is_dialog_question_row(line))
+    {
+        (*anchor, *anchor)
+    } else {
+        let start = nonempty
+            .get(nonempty.len().saturating_sub(8))
+            .map_or(0, |(index, _)| *index);
+        let end = nonempty.last().map_or(start, |(index, _)| *index);
+        (start, end)
+    };
+
+    lines[start..=end]
+        .iter()
+        .filter(|line| !line.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_dialog_question_row(line: &str) -> bool {
+    let lowercase = line.to_lowercase();
+    line.ends_with('?')
+        || [
+            "permission required",
+            "authentication required",
+            "type your own answer",
+            "do you want to proceed",
+            "allow this command",
+            "allow this tool",
+            "approve this action",
+            "would you like to run",
+            "do you trust",
+            "press enter to continue",
+        ]
+        .iter()
+        .any(|pattern| lowercase.contains(pattern))
+}
+
+fn is_dialog_choice_row(line: &str) -> bool {
+    let line = line
+        .trim_start_matches(['┃', '›', '❯', '>', '*', '•', '○', '●', '◉', '◯', '☐', '☑'])
+        .trim_start();
+    if line.starts_with("[ ]") || line.starts_with("[x]") || line.starts_with("[X]") {
+        return true;
+    }
+    let lowercase = line.to_lowercase();
+    if lowercase.contains("allow once")
+        && (lowercase.contains("allow always") || lowercase.contains("reject"))
+    {
+        return true;
+    }
+    let Some((number, choice)) = line.split_once('.').or_else(|| line.split_once(')')) else {
+        return false;
+    };
+    !number.is_empty()
+        && number.chars().all(|character| character.is_ascii_digit())
+        && !choice.trim().is_empty()
+}
+
 pub(crate) struct StagedAgentAttachments {
     root: PathBuf,
     directory: Option<PathBuf>,
@@ -3381,6 +3559,18 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn dialog_region_ignores_unrelated_viewport_rows_and_normalizes_whitespace() {
+        let first = normalized_dialog_region(
+            "status: 1\nlog output\nDo you want to proceed?\n❯ 1.   Yes, allow\n  2. No",
+        );
+        let repainted = normalized_dialog_region(
+            "status: 2\ndifferent background output\nDo you want to proceed?\n❯ 1. Yes, allow\n  2. No",
+        );
+        assert_eq!(first, repainted);
+        assert_eq!(first, "Do you want to proceed?\n❯ 1. Yes, allow\n2. No");
+    }
+
     fn output_test_process(project_path: &str) -> Process {
         Process {
             id: 31,
@@ -3406,6 +3596,75 @@ mod tests {
             spawned_by_process_id: None,
             sort_order: 0,
         }
+    }
+
+    #[test]
+    fn opencode_missing_busy_canary_is_per_input_and_rate_limited() {
+        let tracker = AttentionTracker::new_at(
+            Some("opencode".into()),
+            workman_core::attention::AttentionConfig::default(),
+            0,
+        );
+        tracker.observe_input_at(1_000);
+        tracker.observe_output_at(
+            b"completed frame",
+            "answer\n┃ Build auto · fixture\n╹▀▀▀▀▀▀▀▀",
+            true,
+            3_000,
+        );
+        let missing_busy = tracker.snapshot_at(8_000);
+        assert_eq!(missing_busy.state, AttentionState::Idle);
+        assert_eq!(missing_busy.work_evidence_at(), None);
+        assert_eq!(missing_opencode_busy_input(&missing_busy), Some(1_000));
+
+        let mut logged = HashMap::new();
+        assert!(should_log_opencode_missing_busy(
+            &mut logged,
+            7,
+            1_000,
+            8_000
+        ));
+        assert!(!should_log_opencode_missing_busy(
+            &mut logged,
+            7,
+            1_000,
+            80_000
+        ));
+        assert!(!should_log_opencode_missing_busy(
+            &mut logged,
+            7,
+            2_000,
+            9_000
+        ));
+        assert!(should_log_opencode_missing_busy(
+            &mut logged,
+            7,
+            2_000,
+            68_000
+        ));
+
+        let busy_tracker = AttentionTracker::new_at(
+            Some("open_code".into()),
+            workman_core::attention::AttentionConfig::default(),
+            0,
+        );
+        busy_tracker.observe_input_at(1_000);
+        busy_tracker.observe_output_at(
+            b"working frame",
+            "┃ Build auto · fixture\n╹▀▀▀▀▀▀▀▀\nesc again to interrupt",
+            true,
+            1_100,
+        );
+        busy_tracker.observe_output_at(
+            b"completed frame",
+            "answer\n┃ Build auto · fixture\n╹▀▀▀▀▀▀▀▀",
+            true,
+            1_200,
+        );
+        let observed_busy = busy_tracker.snapshot_at(6_200);
+        assert_eq!(observed_busy.state, AttentionState::Idle);
+        assert!(observed_busy.work_evidence_at().is_some());
+        assert_eq!(missing_opencode_busy_input(&observed_busy), None);
     }
 
     #[cfg(unix)]
@@ -3644,6 +3903,25 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn opencode_dialog_regions_exclude_transcript_and_control_hints() {
+        let question = normalized_dialog_region(include_str!(
+            "../../workman-core/tests/fixtures/attention/opencode_question_dialog.txt"
+        ));
+        assert!(question.starts_with("┃ Which color do you prefer: red or blue?"));
+        assert!(question.ends_with("┃ 3. Type your own answer"));
+        assert!(!question.contains("Asked 1 question"));
+        assert!(!question.contains("esc dismiss"));
+
+        let permission = normalized_dialog_region(include_str!(
+            "../../workman-core/tests/fixtures/attention/opencode_permission_dialog.txt"
+        ));
+        assert!(permission.starts_with("┃ △ Permission required"));
+        assert!(permission.contains("printf ok > permission-dialog.txt"));
+        assert!(permission.ends_with("enter confirm"));
+        assert!(!permission.contains("Thought:"));
     }
 
     #[test]
