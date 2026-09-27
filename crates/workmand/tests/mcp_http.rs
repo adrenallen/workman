@@ -436,6 +436,7 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     let tools_help = call(&process_client, "help", json!({ "topic": "tools" })).await;
     let tools_help_text = tools_help["text"].as_str().unwrap();
     assert!(tools_help_text.contains("fixed when an agent launches"));
+    assert!(tools_help_text.contains("This agent: Extended"));
     assert!(tools_help_text.contains("Core:"));
     assert!(tools_help_text.contains("Extended (requires the Extended profile):"));
     assert!(tools_help_text.contains("whoami —"));
@@ -484,7 +485,7 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         spawning_help["text"]
             .as_str()
             .unwrap()
-            .contains("update_process can toggle an existing direct child")
+            .contains("update_process (Extended profile) can toggle an existing direct child")
     );
     let timer_help = call(&process_client, "help", json!({ "topic": "timers" })).await;
     assert!(

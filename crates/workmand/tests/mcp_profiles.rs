@@ -226,6 +226,7 @@ async fn profiles_filter_every_client_handshake_and_keep_user_surface_full()
     let core_help = core_help.structured_content.expect("structured tools help");
     let core_help = core_help["text"].as_str().expect("tools help text");
     assert!(core_help.contains("fixed when an agent launches"));
+    assert!(core_help.contains("This agent: Core"));
     assert!(core_help.contains("Core:\nwhoami —"));
     assert!(core_help.contains("Extended (requires the Extended profile):"));
     assert!(core_help.contains("spawn_terminal —"));
@@ -251,6 +252,52 @@ async fn profiles_filter_every_client_handshake_and_keep_user_surface_full()
             .unwrap()
             .contains("fixed for its lifetime")
     );
+    assert!(
+        denied["message"]
+            .as_str()
+            .unwrap()
+            .contains("Ask the user to launch this agent from an Extended template or agent tool")
+    );
+    assert!(
+        denied["message"]
+            .as_str()
+            .unwrap()
+            .contains("mcp_tools_profile=\"extended\"")
+    );
+    let unclassified = core_client
+        .call_tool(CallToolRequestParams::new("future_unclassified_tool"))
+        .await?;
+    assert_eq!(unclassified.is_error, Some(true));
+    let unclassified = unclassified
+        .structured_content
+        .expect("structured unclassified-tool error");
+    assert_eq!(unclassified["code"], "mcp_tool_unavailable");
+    assert!(
+        unclassified["message"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable to this agent's Core MCP tools profile")
+    );
+    for (topic, expected) in [
+        ("spawning", "update_process (Extended profile)"),
+        ("worktrees", "worktree_list (Extended profile)"),
+        (
+            "scratchpads",
+            "with the Extended profile, they may also delete",
+        ),
+    ] {
+        let help = core_client
+            .call_tool(
+                CallToolRequestParams::new("help")
+                    .with_arguments(arguments(json!({ "topic": topic }))),
+            )
+            .await?;
+        let help = help.structured_content.expect("structured topic help");
+        assert!(
+            help["text"].as_str().unwrap().contains(expected),
+            "{topic} help did not qualify its Extended-only guidance"
+        );
+    }
     let _ = core_client.cancel().await;
 
     let extended_transport = StreamableHttpClientTransport::from_config(
@@ -264,6 +311,21 @@ async fn profiles_filter_every_client_handshake_and_keep_user_surface_full()
         .collect::<Vec<_>>();
     expected_extended.sort();
     assert_eq!(tool_names(&extended_client).await?, expected_extended);
+    let extended_help = extended_client
+        .call_tool(
+            CallToolRequestParams::new("help")
+                .with_arguments(arguments(json!({ "topic": "tools" }))),
+        )
+        .await?;
+    let extended_help = extended_help
+        .structured_content
+        .expect("structured Extended tools help");
+    assert!(
+        extended_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("This agent: Extended")
+    );
     let _ = extended_client.cancel().await;
 
     let user_transport = StreamableHttpClientTransport::from_config(
@@ -289,6 +351,7 @@ async fn profiles_filter_every_client_handshake_and_keep_user_surface_full()
     assert!(user_help.contains("Core:\nwhoami —"));
     assert!(user_help.contains("Extended (requires the Extended profile):"));
     assert!(user_help.contains("User-only:\nagent_tool_configure —"));
+    assert!(!user_help.contains("This agent:"));
     let _ = user_client.cancel().await;
 
     {
