@@ -12,6 +12,19 @@
   const scratchpad = { projectId: 1, pane: { type: 'selection' as const, selection: { key: 'scratchpad:1001', kind: 'scratchpad' as const, id: 1001, projectId: 1, label: 'Editor regression fixture' } } };
   const other = { projectId: 1, pane: { type: 'overview' as const } };
   let history = $state(recordWorkspaceView(recordWorkspaceView(emptyWorkspaceViewHistory, other), scratchpad));
+  const tableRegression = [
+    '| First table | Value |',
+    '| --- | ---: |',
+    '| Earlier first | zero |',
+    '| Last first | one |',
+    'Paragraph below first table.',
+    '',
+    '| Second table | Value |',
+    '| --- | ---: |',
+    '| Earlier second | one |',
+    '| Last second | two |',
+    'Paragraph below second table.'
+  ].join('\n');
   async function switchPane(next = !shown) {
     shown = next;
     history = recordWorkspaceView(history, shown ? scratchpad : other);
@@ -22,7 +35,7 @@
     scratchpad: {
       id: 1001, project_id: 1, name: 'Editor regression fixture', revision: 1,
       tags: [], archived: false, created_by: 'Fixture', updated_by: 'Fixture',
-      content: Array.from({ length: 50 }, (_, i) => [
+      content: `${tableRegression}\n\n${Array.from({ length: 50 }, (_, i) => [
         `## Section ${i + 1}`,
         ...Array.from({ length: 5 }, (_, j) => `Paragraph ${i + 1}.${j + 1}: Click here to edit **bold text** and select ordinary text without losing your place.`),
         '```javascript',
@@ -31,7 +44,7 @@
         'console.log(section);',
         '```',
         'Text after the code block with `inline code`.'
-      ].join('\n\n')).join('\n\n')
+      ].join('\n\n')).join('\n\n')}`
     },
     total_lines: 1200, comments: [], comment_total_count: 0,
     unresolved_comment_count: 0, comments_revision: 0
@@ -45,9 +58,18 @@
     created_at: Date.now(), updated_at: Date.now(), anchor_state: 'anchored',
     current_start: start, current_end: start + quote.length,
     current_start_line: null, current_end_line: null, can_edit: true, can_resolve: true, can_delete: true
+  }, {
+    id: 2, scratchpad_id: 1001, actor: 'Reviewer', actor_kind: 'user', body: 'A comment inside the first table.',
+    quote: 'Last first', anchor_start: read.scratchpad.content.indexOf('Last first'),
+    anchor_end: read.scratchpad.content.indexOf('Last first') + 'Last first'.length,
+    anchor_prefix: null, anchor_suffix: null, anchor_revision: 1, resolved: false,
+    created_at: Date.now(), updated_at: Date.now(), anchor_state: 'anchored',
+    current_start: read.scratchpad.content.indexOf('Last first'),
+    current_end: read.scratchpad.content.indexOf('Last first') + 'Last first'.length,
+    current_start_line: null, current_end_line: null, can_edit: true, can_resolve: true, can_delete: true
   }];
-  read.comment_total_count = 1;
-  read.unresolved_comment_count = 1;
+  read.comment_total_count = 2;
+  read.unresolved_comment_count = 2;
   async function save(content: string, expectedRevision: number): Promise<ScratchpadRead> {
     if (failSaves) throw new Error('Fixture save unavailable');
     if (expectedRevision !== read.scratchpad.revision) throw new Error('Revision conflict');

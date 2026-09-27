@@ -27,6 +27,20 @@ test('fences match marker type and length, including unclosed fences while typin
   assert.equal(markdownCodeBlocks('inline ``` text\n    ```\n```bad`info').length, 0);
 });
 
+test('fences nested under list content share the same block ranges used by tables', () => {
+  const source = '- item\n  ```md\n  fake | table\n  --- | ---\n  ```\nafter';
+  const [block] = markdownCodeBlocks(source);
+  assert.equal(source.slice(block.from, block.openingTo), '  ```md');
+  assert.equal(source.slice(block.contentFrom, block.contentTo), '  fake | table\n  --- | ---\n');
+});
+
+test('list fences keep the lenient column-zero closer from main', () => {
+  const source = '- Install\n  ```bash\n  npm test\n```\n\n| Next | Value |\n| --- | --- |';
+  const [block] = markdownCodeBlocks(source);
+  assert.equal(source.slice(block.closingFrom, block.to), '```');
+  assert.equal(block.to, source.indexOf('```', source.indexOf('```') + 3) + 3);
+});
+
 test('code blocks spanning well beyond a viewport retain their opening fence', () => {
   const source = '```\n' + 'code\n'.repeat(1000) + '```';
   const [block] = markdownCodeBlocks(source);

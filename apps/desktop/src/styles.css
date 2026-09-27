@@ -291,6 +291,97 @@ html.workman-document-hidden *::after {
   animation-play-state: paused !important;
 }
 
+.markdown-table-scroll {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin: var(--space-3) 0 var(--space-4);
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.markdown-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  color: var(--muted-foreground);
+  font-family: var(--ui-font-family);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.markdown-table th,
+.markdown-table td {
+  min-width: 7rem;
+  max-width: 28rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 0.4rem 0.55rem;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.markdown-table th:last-child,
+.markdown-table td:last-child {
+  border-right: 0;
+}
+
+.markdown-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.markdown-table th {
+  background: var(--card);
+  color: var(--foreground);
+  font-weight: 650;
+}
+
+.markdown-table td {
+  background: var(--background);
+}
+
+.markdown-table code {
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-1);
+  background: var(--muted-surface);
+  color: var(--foreground);
+  font-family: var(--terminal-font-family);
+  font-size: var(--font-size-xs);
+}
+
+.markdown-table a {
+  color: var(--ring);
+  text-underline-offset: 3px;
+}
+
+.markdown-table .cm-table-commented {
+  background: color-mix(in srgb, var(--notification-unread) 10%, var(--background));
+  box-shadow: inset 0 -1px var(--notification-unread);
+}
+
+.markdown-table .cm-table-comment-focused {
+  background: color-mix(in srgb, var(--notification-unread) 22%, var(--background));
+}
+
+.cm-live-table-block {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0.45rem 0;
+}
+
+.cm-live-table-scroll {
+  width: 0;
+  min-width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+}
+
 [data-slot='button'],
 [data-slot$='-item'],
 [data-slot='input'],

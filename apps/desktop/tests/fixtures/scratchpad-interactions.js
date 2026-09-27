@@ -8,6 +8,40 @@ async page => {
   await page.reload();
   await page.waitForSelector('.cm-content');
   await page.waitForTimeout(250);
+  await page.locator('.fixture-controls').click({ position: { x: 4, y: 4 } });
+  assert(await page.locator('.cm-live-table-block').count() === 2,
+    'Unfocused tables, including a remembered cursor at position zero, should render');
+  await page.locator('.cm-live-table-block').first().click({ position: { x: 2, y: 2 } });
+  assert(await page.locator('.cm-live-table-block').count() === 2,
+    'Clicking table padding revealed source');
+  for (const [paragraph, lastRow] of [
+    ['Paragraph below first table.', 'Last first'],
+    ['Paragraph below second table.', 'Last second']
+  ]) {
+    await page.locator('.cm-line').filter({ hasText: paragraph }).click();
+    await page.keyboard.press('ArrowUp');
+    const activeLine = await page.locator('.cm-activeLine').innerText();
+    assert(activeLine.includes(lastRow), `ArrowUp above ${paragraph} landed on ${activeLine}`);
+  }
+  await page.locator('.cm-line').filter({ hasText: 'Paragraph below first table.' }).click();
+  const secondScroll = page.locator('.cm-live-table-scroll').nth(1);
+  await secondScroll.evaluate(el => {
+    el.firstElementChild.style.width = '2000px';
+    el.scrollLeft = 20;
+    window.__tableScrollNode = el;
+  });
+  const scrolled = await secondScroll.evaluate(el => el.scrollLeft);
+  await page.keyboard.press('End');
+  await page.keyboard.insertText('x');
+  assert(await page.evaluate(() => window.__tableScrollNode?.isConnected),
+    'Typing above a table rebuilt its DOM');
+  assert(await secondScroll.evaluate(el => el.scrollLeft) === scrolled,
+    'Typing above a table reset its horizontal scroll');
+  await page.keyboard.press('Backspace');
+  await page.locator('.cm-live-table-block .cm-comment-marker').click();
+  assert(await page.locator('.cm-table-comment-focused').count() > 0,
+    'A table comment marker did not activate on its first click');
+  await page.keyboard.press('Escape');
   // Exercise the shared copy boundary without changing the user's system clipboard.
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true,
     value: { writeText: async text => { window.__copiedCode = text; } } }));
@@ -15,16 +49,22 @@ async page => {
     top: document.querySelector('.document-viewport').scrollTop,
     text: getSelection()?.anchorNode?.textContent, offset: getSelection()?.anchorOffset
   }));
-  await page.locator('.document-viewport').evaluate(el => { el.scrollTop = 14000; });
-  await page.waitForTimeout(300);
+  let point = null;
+  for (const top of [11000, 11500, 12000, 12500, 13000, 13500, 14000]) {
+    await page.locator('.document-viewport').evaluate((el, nextTop) => { el.scrollTop = nextTop; }, top);
+    await page.waitForTimeout(100);
+    point = await page.evaluate(() => {
+      const line = [...document.querySelectorAll('.cm-line')].find(el => {
+        const r = el.getBoundingClientRect(); return r.top > 230 && r.bottom < 400 && el.textContent.startsWith('Paragraph');
+      });
+      if (!line) return null;
+      const r = line.getBoundingClientRect(); return { x: r.left + 90, y: r.top + r.height / 2 };
+    });
+    if (point) break;
+  }
+  assert(point, 'Could not find ordinary text in the deep virtualized viewport');
   const beforeClick = await readPosition();
   assert(beforeClick.top > 10000, 'Regression must exercise a deeply scrolled document');
-  const point = await page.evaluate(() => {
-    const line = [...document.querySelectorAll('.cm-line')].find(el => {
-      const r = el.getBoundingClientRect(); return r.top > 230 && r.bottom < 400 && el.textContent.startsWith('Paragraph');
-    });
-    const r = line.getBoundingClientRect(); return { x: r.left + 90, y: r.top + r.height / 2 };
-  });
   await page.mouse.click(point.x, point.y);
   const before = await readPosition();
   assert(Math.abs(before.top - beforeClick.top) < 2, `Clicking ordinary text moved the scratchpad: ${beforeClick.top} → ${before.top}`);

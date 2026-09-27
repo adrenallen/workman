@@ -2,7 +2,7 @@
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language';
   import { markdown } from '@codemirror/lang-markdown';
-  import { Annotation, EditorState, StateEffect, StateField, type Range } from '@codemirror/state';
+  import { Annotation, EditorState, StateEffect, StateField, Transaction, type Range } from '@codemirror/state';
   import {
     Decoration,
     EditorView,
@@ -41,6 +41,7 @@
     markdownLinkAt,
     openExternalUrl
   } from './externalLinks';
+  import { isBrowserUrl } from './openers';
   import { primaryModifier } from './primaryModifier';
   import {
     resolveScratchpadAnchor,
@@ -49,6 +50,19 @@
     type ScratchpadSelectionAnchor
   } from './scratchpadAnchors';
   import { scratchpadLocalImagePath, scratchpadMarkdownImages } from './scratchpadImages';
+  import {
+    formatMarkdownTable,
+    mapMarkdownTableCellPosition,
+    markdownTableFormattingChanges,
+    markdownTableHeaderStartsAt,
+    navigableTableCells,
+    parseMarkdownInline,
+    parseMarkdownTables,
+    safeMarkdownInlineTokens,
+    tableAtPosition,
+    type MarkdownTable,
+    type MarkdownTableCell
+  } from './markdownTables';
 
   interface Props {
     value: string;
@@ -99,11 +113,17 @@
   const imageObjectUrls = new Set<string>();
 
   const externalChange = Annotation.define<boolean>();
+  const tableFormatChange = Annotation.define<boolean>();
+  const tablePositionMapper = Annotation.define<PositionMapper>();
+  const refreshTableDecorations = StateEffect.define<null>();
+  const setTableFocused = StateEffect.define<boolean>();
   const setCommentDecorations = StateEffect.define<DecorationSet>();
   const commentDecorationField = StateField.define<DecorationSet>({
     create: () => Decoration.none,
     update(decorations, transaction) {
-      let next = decorations.map(transaction.changes);
+      let next = transaction.annotation(externalChange)
+        ? Decoration.none
+        : decorations.map(transaction.changes);
       for (const effect of transaction.effects) {
         if (effect.is(setCommentDecorations)) next = effect.value;
       }
@@ -111,6 +131,48 @@
     },
     provide: (field) => EditorView.decorations.from(field)
   });
+
+  interface MarkdownTableFieldValue {
+    tables: MarkdownTable[];
+    decorations: DecorationSet;
+    tableComments: RenderedTableComment[];
+    focused: boolean;
+  }
+
+  const markdownTableField = StateField.define<MarkdownTableFieldValue>({
+    create(state) {
+      const content = state.doc.toString();
+      return markdownTableDecorations(
+        state,
+        false,
+        resolveTableComments(content, state),
+        parseMarkdownTables(content, state.field(codeBlocks))
+      );
+    },
+    update(current, transaction) {
+      const commentsChanged = transaction.effects.some((effect) => effect.is(refreshTableDecorations));
+      let focused = current.focused;
+      for (const effect of transaction.effects) {
+        if (effect.is(setTableFocused)) focused = effect.value;
+      }
+      if (!transaction.docChanged && transaction.selection === undefined && !commentsChanged && focused === current.focused) return current;
+      const content = transaction.docChanged ? transaction.state.doc.toString() : null;
+      const tableComments = content !== null || commentsChanged
+        ? resolveTableComments(content ?? transaction.state.doc.toString(), transaction.state)
+        : current.tableComments;
+      return markdownTableDecorations(
+        transaction.state,
+        focused,
+        tableComments,
+        content === null
+          ? current.tables
+          : parseMarkdownTables(content, transaction.state.field(codeBlocks))
+      );
+    },
+    provide: (field) => EditorView.decorations.from(field, (value) => value.decorations)
+  });
+
+  let tableVisit: { from: number; dirty: boolean } | null = null;
 
   function replaceSelection(prefix: string, suffix = prefix, fallback = 'text'): void {
     if (!view) return;
@@ -173,9 +235,10 @@
     for (const comment of comments) {
       if (comment.resolved && !showResolvedComments) continue;
       const resolved = resolveScratchpadAnchor(content, comment);
-      const from = resolved.current_start;
-      const to = resolved.current_end;
-      if (resolved.anchor_state !== 'anchored' || from === null || to === null) continue;
+      const fallback = mappedCommentRange(editor.state, comment.id);
+      const from = resolved.anchor_state === 'anchored' ? resolved.current_start : fallback?.from ?? null;
+      const to = resolved.anchor_state === 'anchored' ? resolved.current_end : fallback?.to ?? null;
+      if (from === null || to === null) continue;
       if (from < 0 || to <= from || to > editor.state.doc.length) continue;
       const key = `${from}:${to}`;
       const group = groups.get(key);
@@ -216,8 +279,23 @@
     return Decoration.set(ranges, true);
   }
 
+  function mappedCommentRange(
+    state: EditorState,
+    commentId: number
+  ): { from: number; to: number } | null {
+    let match: { from: number; to: number } | null = null;
+    state.field(commentDecorationField).between(0, state.doc.length, (from, to, decoration) => {
+      const ids = decoration.spec.attributes?.['data-scratchpad-comment-ids']?.split(',') ?? [];
+      if (to > from && ids.includes(String(commentId))) match = { from, to };
+    });
+    return match;
+  }
+
   function refreshCommentDecorations(editor: EditorView): void {
-    editor.dispatch({ effects: setCommentDecorations.of(commentDecorations(editor)) });
+    editor.dispatch({ effects: [
+      setCommentDecorations.of(commentDecorations(editor)),
+      refreshTableDecorations.of(null)
+    ] });
   }
 
   function reportSelection(editor: EditorView): void {
@@ -286,16 +364,34 @@
     }
 
     toDOM(): HTMLElement {
+      return createCommentMarker(this.ids, this.resolved);
+    }
+
+    eq(other: CommentMarkerWidget): boolean {
+      return this.resolved === other.resolved &&
+        this.ids.join(',') === other.ids.join(',');
+    }
+
+    ignoreEvent(): boolean {
+      return false;
+    }
+  }
+
+  function createCommentMarker(
+    ids: number[],
+    resolved: boolean,
+    title = ids.length === 1 ? 'Open comment' : `Open ${ids.length} comments`
+  ): HTMLButtonElement {
       const marker = document.createElement('button');
       marker.type = 'button';
       marker.className = [
         'cm-comment-marker',
-        this.resolved ? 'cm-comment-marker-resolved' : ''
+        resolved ? 'cm-comment-marker-resolved' : ''
       ].filter(Boolean).join(' ');
-      marker.dataset.scratchpadCommentId = String(this.ids[0]);
-      marker.dataset.scratchpadCommentIds = this.ids.join(',');
+      marker.dataset.scratchpadCommentId = String(ids[0]);
+      marker.dataset.scratchpadCommentIds = ids.join(',');
       marker.contentEditable = 'false';
-      marker.title = this.ids.length === 1 ? 'Open comment' : `Open ${this.ids.length} comments`;
+      marker.title = title;
       marker.setAttribute('aria-label', marker.title);
 
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -312,22 +408,12 @@
       path.setAttribute('d', 'M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z');
       svg.append(path);
       marker.append(svg);
-      if (this.ids.length > 1) {
+      if (ids.length > 1) {
         const count = document.createElement('span');
-        count.textContent = String(this.ids.length);
+        count.textContent = String(ids.length);
         marker.append(count);
       }
       return marker;
-    }
-
-    eq(other: CommentMarkerWidget): boolean {
-      return this.resolved === other.resolved &&
-        this.ids.join(',') === other.ids.join(',');
-    }
-
-    ignoreEvent(): boolean {
-      return false;
-    }
   }
 
   interface AttachmentImageRead {
@@ -408,6 +494,254 @@
     ignoreEvent(): boolean {
       return false;
     }
+  }
+
+  interface RenderedTableComment {
+    id: number;
+    from: number;
+    to: number;
+    resolved: boolean;
+    focused: boolean;
+    title: string;
+  }
+
+  function mappedCommentRanges(state: EditorState): Map<number, { from: number; to: number }> {
+    const ranges = new Map<number, { from: number; to: number }>();
+    state.field(commentDecorationField).between(0, state.doc.length, (from, to, decoration) => {
+      if (to <= from) return;
+      for (const id of decoration.spec.attributes?.['data-scratchpad-comment-ids']?.split(',') ?? []) {
+        const commentId = Number(id);
+        if (Number.isInteger(commentId)) ranges.set(commentId, { from, to });
+      }
+    });
+    return ranges;
+  }
+
+  function resolveTableComments(
+    content: string,
+    state: EditorState
+  ): RenderedTableComment[] {
+    const fallbackRanges = mappedCommentRanges(state);
+    return comments.flatMap((comment) => {
+      if (comment.resolved && !showResolvedComments) return [];
+      const resolved = resolveScratchpadAnchor(content, comment);
+      const fallback = fallbackRanges.get(comment.id);
+      const from = resolved.anchor_state === 'anchored' ? resolved.current_start : fallback?.from ?? null;
+      const to = resolved.anchor_state === 'anchored' ? resolved.current_end : fallback?.to ?? null;
+      if (
+        from === null ||
+        to === null ||
+        from < 0 ||
+        to <= from ||
+        to > state.doc.length
+      ) return [];
+      return [{
+        id: comment.id,
+        from,
+        to,
+        resolved: comment.resolved,
+        focused: focusedCommentId === comment.id,
+        title: `${comment.actor}: ${comment.body.replaceAll(/\s+/g, ' ').slice(0, 120)}`
+      }];
+    });
+  }
+
+  function appendInlineMarkdown(parent: HTMLElement, source: string): void {
+    for (const token of safeMarkdownInlineTokens(
+      parseMarkdownInline(source, { tableCell: true }),
+      isBrowserUrl
+    )) {
+      if (token.kind === 'text') {
+        parent.append(document.createTextNode(token.text));
+        continue;
+      }
+      const element = document.createElement(
+        token.kind === 'strong' ? 'strong' :
+        token.kind === 'emphasis' ? 'em' :
+        token.kind === 'code' ? 'code' : 'a'
+      );
+      element.textContent = token.text;
+      if (token.kind === 'link') {
+        element.setAttribute('href', token.href);
+        element.setAttribute('title', EXTERNAL_LINK_TOOLTIP);
+      }
+      parent.append(element);
+    }
+  }
+
+  function overlapsComment(cell: MarkdownTableCell, comment: RenderedTableComment): boolean {
+    return cell.from < comment.to && cell.to > comment.from;
+  }
+
+  class MarkdownTableWidget extends WidgetType {
+    readonly signature: string;
+    readonly table: MarkdownTable;
+    readonly source: string;
+    readonly tableComments: RenderedTableComment[];
+
+    constructor(
+      table: MarkdownTable,
+      source: string,
+      tableComments: RenderedTableComment[]
+    ) {
+      super();
+      this.table = table;
+      this.source = source;
+      this.tableComments = tableComments;
+      this.signature = `${source}:${tableComments
+        .map((comment) => `${comment.id}:${comment.from - table.from}:${comment.to - table.from}:${comment.resolved}:${comment.focused}`)
+        .join(',')}`;
+    }
+
+    eq(other: MarkdownTableWidget): boolean {
+      return this.signature === other.signature;
+    }
+
+    toDOM(editor: EditorView): HTMLElement {
+      const frame = document.createElement('div');
+      frame.className = 'cm-live-table-block';
+      frame.contentEditable = 'false';
+      frame.setAttribute('role', 'group');
+      frame.setAttribute('aria-label', 'Markdown table. Click a cell to edit its source.');
+      frame.addEventListener('mousedown', (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (target?.closest('th, td')) return;
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      const scroll = frame.appendChild(document.createElement('div'));
+      scroll.className = 'markdown-table-scroll cm-live-table-scroll';
+      const element = scroll.appendChild(document.createElement('table'));
+      element.className = 'markdown-table';
+      const head = element.appendChild(document.createElement('thead'));
+      const headRow = head.appendChild(document.createElement('tr'));
+      const body = element.appendChild(document.createElement('tbody'));
+      const rows = [this.table.header, ...this.table.rows];
+      const commentedCells = new Set<string>();
+      const focusedCells = new Set<string>();
+      const assignedComments = new Map<string, RenderedTableComment[]>();
+
+      for (const comment of this.tableComments) {
+        const matching: string[] = [];
+        for (const row of rows) {
+          row.cells.forEach((candidate, column) => {
+            if (overlapsComment(candidate, comment)) matching.push(`${row.line}:${column}`);
+          });
+        }
+        const targets = matching.length > 0 ? matching : [`${this.table.header.line}:0`];
+        for (const key of targets) {
+          commentedCells.add(key);
+          if (comment.focused) focusedCells.add(key);
+        }
+        const markerKey = targets[0];
+        assignedComments.set(markerKey, [...(assignedComments.get(markerKey) ?? []), comment]);
+      }
+
+      const appendCell = (
+        row: MarkdownTable['header'],
+        column: number,
+        cellElement: HTMLTableCellElement
+      ): void => {
+        const cell = row.cells[column];
+        const relativeFrom = cell.from - this.table.from;
+        const relativeTo = cell.to - this.table.from;
+        const key = `${row.line}:${column}`;
+        cellElement.style.textAlign = this.table.alignments[column] ?? 'left';
+        if (commentedCells.has(key)) cellElement.classList.add('cm-table-commented');
+        if (focusedCells.has(key)) cellElement.classList.add('cm-table-comment-focused');
+        appendInlineMarkdown(cellElement, cell.text);
+        const cellComments = assignedComments.get(key) ?? [];
+        if (cellComments.length > 0) {
+          cellElement.append(createCommentMarker(
+            cellComments.map((comment) => comment.id),
+            cellComments.every((comment) => comment.resolved),
+            cellComments.length === 1 ? cellComments[0].title : `${cellComments.length} comments in this cell`
+          ));
+        }
+        cellElement.addEventListener('mousedown', (event) => {
+          if (event.button !== 0) return;
+          const target = event.target instanceof Element ? event.target : null;
+          if (target?.closest('.cm-comment-marker')) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+          const link = target?.closest<HTMLAnchorElement>('a[href]');
+          if (link && primaryModifier(event)) {
+            event.preventDefault();
+            event.stopPropagation();
+            openExternalUrl(link.getAttribute('href') ?? '');
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          const bounds = cellElement.getBoundingClientRect();
+          const ratio = bounds.width > 0
+            ? Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width))
+            : 0;
+          let tableFrom = this.table.from;
+          try {
+            tableFrom = editor.posAtDOM(frame);
+          } catch {
+            // The widget may be leaving the viewport; its last known position is safe.
+          }
+          const anchor = tableFrom + relativeFrom +
+            Math.round((relativeTo - relativeFrom) * ratio);
+          editor.dispatch({ selection: { anchor }, scrollIntoView: true });
+          editor.focus();
+        });
+      };
+
+      this.table.header.cells.forEach((_, column) => {
+        const header = headRow.appendChild(document.createElement('th'));
+        header.scope = 'col';
+        appendCell(this.table.header, column, header);
+      });
+      for (const row of this.table.rows) {
+        const tableRow = body.appendChild(document.createElement('tr'));
+        row.cells.forEach((_, column) => appendCell(
+          row,
+          column,
+          tableRow.appendChild(document.createElement('td'))
+        ));
+      }
+      return frame;
+    }
+
+    ignoreEvent(event: Event): boolean {
+      const target = event.target instanceof Element ? event.target : null;
+      return !target?.closest('th, td');
+    }
+  }
+
+  function markdownTableDecorations(
+    state: EditorState,
+    focused: boolean,
+    tableComments: RenderedTableComment[],
+    tables: MarkdownTable[]
+  ): MarkdownTableFieldValue {
+    const ranges: Range<Decoration>[] = [];
+    for (const table of tables) {
+      const revealed = focused && state.selection.ranges.some((range) =>
+        range.head >= table.from && range.head <= table.to
+      );
+      if (revealed) {
+        for (let line = table.startLine + 1; line <= table.endLine + 1; line += 1) {
+          ranges.push(Decoration.line({ class: 'cm-live-table-source' }).range(state.doc.line(line).from));
+        }
+      } else {
+        ranges.push(Decoration.replace({
+          widget: new MarkdownTableWidget(
+            table,
+            state.sliceDoc(table.from, table.to),
+            tableComments.filter((comment) => comment.from < table.to && comment.to > table.from)
+          ),
+          block: true,
+          inclusive: false
+        }).range(table.from, table.to));
+      }
+    }
+    return { tables, decorations: Decoration.set(ranges, true), tableComments, focused };
   }
 
   function cursorTouches(view: EditorView, from: number, to: number): boolean {
@@ -497,6 +831,7 @@
 
   function liveDecorations(editor: EditorView): DecorationSet {
     const ranges: Range<Decoration>[] = [];
+    const tables = editor.state.field(markdownTableField).tables;
     for (const { from, to } of editor.visibleRanges) {
       let position = from;
       while (position <= to) {
@@ -506,8 +841,9 @@
         const bullet = /^(\s*)([-+*])(\s+)/.exec(line.text);
         const ordered = /^(\s*)(\d+\.)(\s+)/.exec(line.text);
 
-
-        if (decorateCodeLine(editor, line.from, ranges)) {
+        if (tableAtPosition(tables, line.from)) {
+          // Table presentation is owned by markdownTableField so block replacements stay valid.
+        } else if (decorateCodeLine(editor, line.from, ranges)) {
           // Code stays native editable text; do not render Markdown inside it.
         } else if (heading) {
           const markerEnd = line.from + heading[0].length;
@@ -573,6 +909,208 @@
     },
     { decorations: (plugin) => plugin.decorations }
   );
+
+  function changesTouchTable(update: ViewUpdate, table: MarkdownTable): boolean {
+    let touched = false;
+    update.changes.iterChangedRanges((from, to) => {
+      if (from <= table.to && to >= table.from) touched = true;
+    });
+    return touched;
+  }
+
+  function sameTableAfterUpdate(
+    update: ViewUpdate,
+    previous: MarkdownTable,
+    next: MarkdownTable | null
+  ): boolean {
+    return next !== null && next.from === update.changes.mapPos(previous.from, -1);
+  }
+
+  function formattingPositionMapper(
+    table: MarkdownTable,
+    formatted: MarkdownTable,
+    fallback: PositionMapper
+  ): PositionMapper {
+    return {
+      mapPos(position, association) {
+        return mapMarkdownTableCellPosition(table, formatted, position) ??
+          fallback.mapPos(position, association);
+      }
+    };
+  }
+
+  function formatTableAfterVisit(editor: EditorView, tableFrom: number, expectedDoc: EditorState['doc']): void {
+    queueMicrotask(() => {
+      if (editor.state.doc !== expectedDoc) return;
+      const table = tableAtPosition(editor.state.field(markdownTableField).tables, tableFrom);
+      if (!table || table.from !== tableFrom) return;
+      const formatted = formatMarkdownTable(table);
+      const changes = markdownTableFormattingChanges(editor.state.doc.toString(), table);
+      if (changes.length === 0) return;
+      const changeSet = editor.state.changes(changes);
+      editor.dispatch({
+        changes,
+        annotations: [
+          tableFormatChange.of(true),
+          tablePositionMapper.of(formattingPositionMapper(
+            table,
+            parseMarkdownTables(formatted)[0],
+            changeSet
+          )),
+          Transaction.userEvent.of('input.table.format')
+        ]
+      });
+    });
+  }
+
+  function trackTableVisit(update: ViewUpdate): void {
+    const previous = tableAtPosition(
+      update.startState.field(markdownTableField).tables,
+      update.startState.selection.main.head
+    );
+    const next = tableAtPosition(
+      update.state.field(markdownTableField).tables,
+      update.state.selection.main.head
+    );
+    const reset = update.transactions.some((transaction) =>
+      transaction.annotation(externalChange) ||
+      transaction.annotation(tableFormatChange) ||
+      transaction.isUserEvent('undo') ||
+      transaction.isUserEvent('redo')
+    );
+    if (reset) {
+      tableVisit = next ? { from: next.from, dirty: false } : null;
+      return;
+    }
+
+    let dirty = tableVisit?.dirty ?? false;
+    if (update.docChanged && previous && changesTouchTable(update, previous)) dirty = true;
+    if (previous && sameTableAfterUpdate(update, previous, next)) {
+      tableVisit = { from: next!.from, dirty };
+      return;
+    }
+
+    if (previous && dirty) {
+      formatTableAfterVisit(
+        update.view,
+        update.changes.mapPos(previous.from, -1),
+        update.state.doc
+      );
+    }
+    tableVisit = next ? { from: next.from, dirty: false } : null;
+  }
+
+  function tableNavigationTarget(
+    table: MarkdownTable,
+    position: number,
+    backwards: boolean
+  ): { index: number; appendRow: boolean } {
+    const cells = navigableTableCells(table);
+    const containing = cells.findIndex((cell) => position >= cell.from && position <= cell.to);
+    if (containing >= 0) return {
+      index: backwards ? Math.max(0, containing - 1) : containing + 1,
+      appendRow: !backwards && containing === cells.length - 1
+    };
+    if (backwards) {
+      for (let index = cells.length - 1; index >= 0; index -= 1) {
+        if (cells[index].from < position) return { index, appendRow: false };
+      }
+      return { index: 0, appendRow: false };
+    }
+    const following = cells.findIndex((cell) => cell.to > position);
+    return following >= 0
+      ? { index: following, appendRow: false }
+      : { index: cells.length - 1, appendRow: false };
+  }
+
+  function navigateTable(editor: EditorView, backwards: boolean): boolean {
+    const table = tableAtPosition(
+      editor.state.field(markdownTableField).tables,
+      editor.state.selection.main.head
+    );
+    if (!table) return false;
+    const navigation = tableNavigationTarget(
+      table,
+      editor.state.selection.main.head,
+      backwards
+    );
+    const appendRow = navigation.appendRow;
+    let target = navigation.index;
+    let formatted = formatMarkdownTable(table);
+    const changes = markdownTableFormattingChanges(editor.state.doc.toString(), table);
+    if (appendRow) {
+      const blankRow = `|${Array.from({ length: table.columnCount }, () => ' ').join('|')}|`;
+      const withRow = `${formatted}\n${blankRow}`;
+      const parsed = parseMarkdownTables(withRow)[0];
+      formatted = formatMarkdownTable(parsed);
+      const appended = formatted.slice(formatMarkdownTable(table).length);
+      const tail = changes.at(-1);
+      if (tail?.to === table.to) tail.insert += appended;
+      else changes.push({ from: table.to, to: table.to, insert: appended });
+    }
+    const formattedTable = parseMarkdownTables(formatted)[0];
+    const formattedCells = navigableTableCells(formattedTable);
+    if (appendRow) target = formattedCells.length - table.columnCount;
+    else target = Math.min(target, formattedCells.length - 1);
+    const targetCell = formattedCells[target];
+    const changeSet = editor.state.changes(changes);
+    editor.dispatch({
+      changes,
+      selection: {
+        anchor: table.from + targetCell.from,
+        head: table.from + targetCell.to
+      },
+      annotations: [
+        tableFormatChange.of(true),
+        tablePositionMapper.of(formattingPositionMapper(table, formattedTable, changeSet)),
+        Transaction.userEvent.of('input.table.navigation')
+      ],
+      scrollIntoView: true
+    });
+    return true;
+  }
+
+  function insertTableRow(editor: EditorView): boolean {
+    const position = editor.state.selection.main.head;
+    const table = tableAtPosition(editor.state.field(markdownTableField).tables, position);
+    if (!table) return false;
+    const currentRow = [table.header, table.delimiter, ...table.rows]
+      .find((row) => position >= row.from && position <= row.to);
+    if (!currentRow) return false;
+    if (
+      currentRow === table.header &&
+      markdownTableHeaderStartsAt(editor.state.doc.toString(), table, position)
+    ) {
+      editor.dispatch({
+        changes: { from: table.from, insert: '\n' },
+        selection: { anchor: table.from },
+        annotations: Transaction.userEvent.of('input.table.exit'),
+        scrollIntoView: true
+      });
+      return true;
+    }
+    if (
+      currentRow === table.rows.at(-1) &&
+      currentRow.cells.every((cell) => cell.text === '')
+    ) {
+      editor.dispatch({
+        changes: { from: currentRow.from, to: currentRow.to, insert: '' },
+        selection: { anchor: currentRow.from },
+        annotations: Transaction.userEvent.of('input.table.exit'),
+        scrollIntoView: true
+      });
+      return true;
+    }
+    const after = currentRow === table.header ? table.delimiter : currentRow;
+    const row = `|${Array.from({ length: table.columnCount }, () => ' ').join('|')}|`;
+    editor.dispatch({
+      changes: { from: after.to, insert: `\n${row}` },
+      selection: { anchor: after.to + 3 },
+      annotations: Transaction.userEvent.of('input.table.row'),
+      scrollIntoView: true
+    });
+    return true;
+  }
 
   function createEditorTheme(flowLayout: boolean) {
     return EditorView.theme({
@@ -664,6 +1202,17 @@
       color: 'var(--muted-foreground)',
       fontFamily: "'JetBrains Mono Variable', monospace"
     },
+    '.cm-live-table-source': {
+      backgroundColor: 'color-mix(in srgb, var(--card) 72%, transparent)',
+      color: 'var(--foreground)',
+      fontFamily: "'JetBrains Mono Variable', monospace",
+      fontSize: '12px',
+      whiteSpace: 'pre-wrap',
+      overflowWrap: 'anywhere'
+    },
+    '.cm-live-table-source.cm-activeLine': {
+      backgroundColor: 'color-mix(in srgb, var(--accent) 78%, transparent)'
+    },
     '.cm-comment-highlight': {
       borderBottom: '1px solid var(--notification-unread)',
       backgroundColor: 'color-mix(in srgb, var(--notification-unread) 12%, transparent)',
@@ -741,8 +1290,9 @@
           EditorView.lineWrapping,
           editorPlaceholder('Start writing Markdown…'),
           codeBlocks,
-          liveMarkdown,
           commentDecorationField,
+          markdownTableField,
+          liveMarkdown,
           createEditorTheme(flow),
           codeBlockTheme,
           EditorView.domEventHandlers({
@@ -771,13 +1321,25 @@
               return true;
             },
             blur: () => {
-              window.setTimeout(() => {
-                if (!view?.hasFocus) selectionAction = null;
-              }, 0);
+              queueMicrotask(() => {
+                if (!view?.hasFocus) {
+                  view?.dispatch({ effects: setTableFocused.of(false) });
+                  selectionAction = null;
+                }
+              });
+              return false;
+            },
+            focus: (_event, editor) => {
+              queueMicrotask(() => {
+                if (editor.hasFocus) editor.dispatch({ effects: setTableFocused.of(true) });
+              });
               return false;
             }
           }),
           keymap.of([
+            { key: 'Tab', run: (editor) => navigateTable(editor, false) },
+            { key: 'Shift-Tab', run: (editor) => navigateTable(editor, true) },
+            { key: 'Enter', run: insertTableRow },
             {
               key: 'Mod-b',
               run: () => {
@@ -804,6 +1366,7 @@
             indentWithTab
           ]),
           EditorView.updateListener.of((update) => {
+            trackTableVisit(update);
             if (memoryKey && update.selectionSet) {
               const { anchor, head } = update.state.selection.main;
               rememberDocumentPosition(memoryKey, { anchor, head });
@@ -824,7 +1387,10 @@
               update.docChanged &&
               !update.transactions.some((transaction) => transaction.annotation(externalChange))
             ) {
-              onChange(update.state.doc.toString(), update.changes);
+              const mapper = update.transactions.length === 1
+                ? update.transactions[0].annotation(tablePositionMapper) ?? update.changes
+                : update.changes;
+              onChange(update.state.doc.toString(), mapper);
             }
           })
         ]

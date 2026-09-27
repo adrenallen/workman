@@ -21,6 +21,8 @@ The interaction fixture checks a document scrolled more than 10,000 pixels, exac
 restoration, unfinished edits, quick taps without an overlay flash, held/repeated shortcuts, both arrows, Escape, literal code
 copying, in-place edits, and typing a new fence. Clipboard writes are captured without
 changing the system clipboard. It saves a screenshot to `/tmp/workman-scratchpad-code-ui.png`.
+It also checks two rendered tables back-to-back with ordinary paragraphs, including the
+ArrowUp geometry boundary below each table and unfocused rendering at cursor position zero.
 
 For actual macOS testing, build the app and launch a disposable copy with
 `scripts/native-visual-qa.sh`. Test ordinary text clicks and Cmd+` in that native window;
