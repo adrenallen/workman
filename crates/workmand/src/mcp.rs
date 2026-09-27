@@ -1,7 +1,6 @@
 //! Core MCP service: identity, scoping, setup tools, and project tools.
 
 use std::{
-    collections::BTreeMap,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -29,7 +28,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use workman_core::{Actor, Process, ProcessId, ProcessStatus, Project, ProjectId};
+use workman_core::{Actor, Process, ProcessId, Project, ProjectId};
 
 use crate::{
     ProcessRegistry, SharedProcessRegistry, project_titles::normalized_project_title,
@@ -46,11 +45,11 @@ mod tools_todo;
 mod tools_worktree;
 
 pub const WORKMAN_MCP_TOKEN_HEADER: &str = "x-workman-mcp-token";
-pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. Review unresolved feedback with scratchpad_read(include_comments=true) or scratchpad_comment_list, and use scratchpad_comment_create for anchored or whole-document discussion. Agents may update, resolve, reopen, or delete only comments they authored; the desktop user may resolve any project comment. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
-pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then assign it with todo_assign(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_assign with assignee omitted/null, or assignee=\"none\", to unassign.";
-pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Template: set agent_template_id only; the template supplies its agent tool, model, effort, launch args and prompt, and initial_prompt is appended. Pass model or agent_tool_id only to override. Use agent_template_id only when the user names a template or explicitly asks for one. A tool override keeps the template's model only for the same agent type, carries effort between Claude and Codex, keeps the prompt, and reports everything else in resolved.template_args_skipped. Set notify_spawner_on_idle=true when the direct agent spawner should receive one coalesced Workman turn as opted-in children finish, need input, exit, or crash; set_notify_spawner_on_idle can toggle an existing direct child prospectively, and the opt-in survives child exit/crash and restart. A finished turn requires an idle child with no queued prompt and eagerly observed work evidence after input attributed to this spawner; generic adapters report at most once per child input, while busy-detecting adapters may report a later real end after fresh busy evidence supersedes a transient idle. A child parked Waiting on its own active timer is not finished. Delivery never merges into a human's unsent draft: a positively non-empty composer holds indefinitely, an unknown composer holds only for 120 seconds after the latest human keystroke, and process status exposes notification_held_by_draft. model is an optional per-launch override that replaces existing long and short model flags for supported tool types; omit it to use the template or agent default, and reserve extra_args for other raw flags. attachments accepts up to 8 absolute paths to raster images of at most 32 MiB each; Workman copies them into daemon-owned storage and appends those saved paths to the initial prompt.";
-pub(crate) const IDLE_TIMER_WAIT_GUIDANCE: &str = "For a child spawned with notify_spawner_on_idle=true, no timer is necessary for ordinary completion wake-up: Workman sends the direct spawner one paste-safe turn, coalescing children that finish, need input, exit, or crash while delivery is pending. A human's unsent draft is never merged: a positively non-empty composer holds indefinitely, while an unknown composer holds for 120 seconds after the latest human keystroke. The status field notification_held_by_draft exposes an active hold. Keys arriving after the final draft check remain protected only by the shared finite typing pause. The opt-in is prospective and survives child exit/crash and restart. A durable completion requires an idle process, no queued prompt, and eagerly observed work evidence after this spawner's last submitted input: either an adapter-recognized busy state or, for an adapter without busy detection, non-cosmetic output past the recent-input grace period. Generic adapters record and notify at most once per input; busy-detecting adapters may supersede a transient mid-turn idle after later real work and notify the later real end. A child parked Waiting on its own timer is not reported finished while that timer is active and unpaused. An explicit pending idle timer wins for Finished only when it is active, unpaused, owned by the spawner, and watches that child, even when it delivers elsewhere; it does not suppress needs-input, exit, or crash. Opting in has no deadline, so keep a delay timer when a hung-child deadline matters. For other waits, call timer_fire_when_idle_any or timer_fire_when_idle_all once. Choose the condition deliberately: timer_fire_when_idle_any delivers immediately for an idle process with an unreported completion since your last submitted input to it, otherwise it waits for a fresh non-idle-to-idle transition; a process you never prompted always requires a fresh transition. timer_fire_when_idle_all counts processes already idle at arm time and waits until every watched process has reached idle. Arm results expose already_idle and satisfied_by diagnostics; for non-immediate timers, timer_list retains those diagnostics after firing. deadline means the timeout fired without reporting a completion, while error means deterministic timer corruption was quarantined and its body was delivered when the target remained readable. When already_satisfied=false and the timer delivers back to you (the default), immediately finish your response and end the current turn; no additional wait call is needed. Do not loop on timer_list or process status while waiting. Workman keeps the timer in the daemon and submits its body to the delivery agent as a fresh user turn when the idle condition or max_wait_ms is reached. When that turn arrives, inspect the watched processes before assuming they finished because the deadline may have fired or an agent may only be waiting on its own timer. If already_satisfied=true, the body was delivered immediately; do not create another timer, and end your current turn if it was delivered to you so the queued user turn can be processed.";
-const SERVER_INSTRUCTIONS: &str = "Need human input or found out-of-scope work? Create a todo or comment, then use todo_assign(assignee=\"user\") or mention @user in a new todo comment; either notifies the human. Call whoami first. Process credentials jail agents to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions have discovery and help only. Use help for detailed guidance on todos, scratchpads, worktrees, timers, tools, and spawning.";
+pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. Review feedback with scratchpad_read(include_comments=true), and use scratchpad_comment_create for anchored or whole-document discussion. Agents may update, resolve, reopen, or delete only comments they authored; the human may resolve any project comment. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
+pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then use todo_update(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_update(assignee=\"none\") to unassign.";
+pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Template summaries include launch settings. Use a template only when the user names a template or explicitly asks for one. The template supplies its tool, launch args, and prompt. A tool override carries the template model only for the same agent type; compatible Claude/Codex effort may carry, command defaults do not carry, and only an explicit caller model replaces model flags. resolved reports effective settings and skipped template args. Set notify_spawner_on_idle=true for a coalesced completion turn; update_process can toggle an existing direct child. Delivery never merges into the human's unsent draft.";
+pub(crate) const IDLE_TIMER_WAIT_GUIDANCE: &str = "For a child spawned with notify_spawner_on_idle=true, no timer is needed for ordinary completion wake-up. The opt-in is prospective and survives child exit, crash, and restart. Keep a delay timer when a hung-child deadline matters. For other waits, call timer_fire_when_idle once with wait_for=\"any\" or wait_for=\"all\". any may deliver immediately for a newly reported completion; all counts processes already idle at arm time. Arm results expose already_idle and satisfied_by diagnostics. deadline means the timeout fired without reporting completion. When already_satisfied=false and the timer delivers to this agent, finish the response and end the turn; do not poll timer_list or process status. When the fresh turn arrives, inspect watched processes because the deadline may have fired or an agent may be waiting on its own timer.";
+const SERVER_INSTRUCTIONS: &str = "Need human input or found out-of-scope work? Create a todo or comment, then use todo_update(assignee=\"user\") or mention @user in a new todo comment; either notifies the human. Call whoami first. Process credentials jail agents to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions have discovery and help only. Use help for todos, scratchpads, worktrees, timers, tools, and spawning.";
 
 #[derive(Clone)]
 pub struct WorkmanMcp {
@@ -183,15 +182,8 @@ struct HelpArgs {
     topic: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-struct ProjectScopeArgs {
-    /// Optional project ID; an identified agent may name only its owning project.
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ProjectRenameArgs {
+struct ProjectUpdateArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
     name: String,
@@ -211,6 +203,7 @@ struct IdentityResult {
     process_name: Option<String>,
     effective_project_id: Option<ProjectId>,
     selected_project_id: Option<ProjectId>,
+    project: Option<Value>,
 }
 
 #[tool_router]
@@ -223,6 +216,19 @@ impl WorkmanMcp {
         match ensure_actor(&mut registry, &parts) {
             Ok((actor, process)) => {
                 let effective_project_id = resolve_project_id(&registry, &actor, None).ok();
+                let project = match effective_project_id {
+                    Some(project_id) => match registry.store().get_project(project_id) {
+                        Ok(Some(project)) => {
+                            match crate::worktrees::project_envelope(registry.store(), project) {
+                                Ok(project) => Some(json!(project)),
+                                Err(error) => return failure(error.code(), error.to_string()),
+                            }
+                        }
+                        Ok(None) => None,
+                        Err(error) => return failure("store_error", error.to_string()),
+                    },
+                    None => None,
+                };
                 success(IdentityResult {
                     actor_id: actor.id,
                     session_id: actor.session_id,
@@ -230,6 +236,7 @@ impl WorkmanMcp {
                     process_name: process.map(|process| process.name),
                     effective_project_id,
                     selected_project_id: actor.selected_project_id,
+                    project,
                 })
             }
             Err(error) => failure("identity_error", error),
@@ -247,10 +254,10 @@ impl WorkmanMcp {
                 "whoami resolves the process credential supplied by the launcher. Identity cannot be claimed or retargeted. If whoami is unidentified or names the wrong process, stop and report a launch-wiring error."
             }
             "scoping" => {
-                "Agent identities are jailed by the daemon to their owning project. Cross-project project_id overrides and indirect process, timer, and transfer targets are rejected; project creation and global configuration are unavailable. Unidentified bearer sessions may use discovery and help but cannot claim a process or perform project-scoped actions. The authenticated UI/CLI control channel remains user-scoped and can manage every project."
+                "Agent identities are jailed by the daemon to their owning project. Cross-project project_id overrides and indirect process or timer targets are rejected; project creation and global configuration are unavailable. Unidentified bearer sessions may use discovery and help but cannot claim a process or perform project-scoped actions. The authenticated UI/CLI control channel remains user-scoped and can manage every project."
             }
             "projects" => {
-                "Project-scoped MCP tools operate only on the calling agent's owning project. Use whoami for project identity and the project/read tools for metadata and status. Project creation and removal stay in the authenticated UI/CLI control channel."
+                "Project-scoped MCP tools operate only on the calling agent's owning project. whoami includes project metadata; list_processes includes process status and counts. Project creation and removal stay in the authenticated UI/CLI control channel."
             }
             "todos" => HUMAN_HANDOFF_GUIDANCE,
             "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
@@ -258,7 +265,7 @@ impl WorkmanMcp {
                 "Use worktree_list to inspect repository worktrees and cached pull-request status. Creation, adoption, and removal stay in the authenticated UI/CLI control channel."
             }
             "timers" => IDLE_TIMER_WAIT_GUIDANCE,
-            "tools" => "Use mcp_tools_summary for the complete core tool list.",
+            "tools" => "Use the MCP tools/list request for the complete tool list and schemas.",
             "spawning" => SPAWN_AGENT_GUIDANCE,
             other => {
                 return failure(
@@ -270,118 +277,11 @@ impl WorkmanMcp {
         success(json!({ "topic": topic, "text": text }))
     }
 
-    #[tool(description = "List the core MCP tools exposed by this daemon")]
-    async fn mcp_tools_summary(&self) -> CallToolResult {
-        let tools = self
-            .tool_router
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.into_owned())
-            .collect::<Vec<_>>();
-        success(json!({
-            "enabled": true,
-            "count": tools.len(),
-            "tools": tools,
-            "spawn_agent_guidance": SPAWN_AGENT_GUIDANCE,
-            "idle_timer_wait_guidance": IDLE_TIMER_WAIT_GUIDANCE,
-        }))
-    }
-
-    #[tool(
-        description = "List registered projects visible to this identity (agents see only their owning project)"
-    )]
-    async fn list_projects(&self, Extension(parts): Extension<Parts>) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (_actor, process) = match ensure_actor(&mut registry, &parts) {
-            Ok(identity) => identity,
-            Err(error) => return failure("identity_error", error),
-        };
-        let projects = match process {
-            Some(process) => registry
-                .store()
-                .get_project(process.project_id)
-                .map(|project| project.into_iter().collect()),
-            None => registry.store().list_projects(),
-        };
-        match projects {
-            Ok(projects) => match crate::worktrees::project_envelopes(registry.store(), projects) {
-                Ok(projects) => success(json!({ "projects": projects })),
-                Err(error) => failure(error.code(), error.to_string()),
-            },
-            Err(error) => failure("store_error", error.to_string()),
-        }
-    }
-
-    #[tool(description = "Get the effective or explicitly requested project")]
-    async fn get_project(
+    #[tool(description = "Update the effective or explicitly requested project")]
+    async fn project_update(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok((project, _)) => match crate::worktrees::project_envelope(registry.store(), project)
-            {
-                Ok(project) => success(project),
-                Err(error) => failure(error.code(), error.to_string()),
-            },
-            Err(error) => failure("project_scope_error", error),
-        }
-    }
-
-    #[tool(description = "Get project metadata plus persisted process status")]
-    async fn get_project_status(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let project = match crate::worktrees::project_envelope(registry.store(), project) {
-            Ok(project) => project,
-            Err(error) => return failure(error.code(), error.to_string()),
-        };
-        match registry.list_statuses(Some(project.project.id)) {
-            Ok(processes) => success(json!({ "project": project, "processes": processes })),
-            Err(error) => failure(error.code(), error.to_string()),
-        }
-    }
-
-    #[tool(description = "Get lightweight process counts for a project")]
-    async fn get_project_stats(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let processes = match registry.list(Some(project.id)) {
-            Ok(processes) => processes,
-            Err(error) => return failure(error.code(), error.to_string()),
-        };
-        let mut by_status = BTreeMap::<String, usize>::new();
-        for process in &processes {
-            *by_status.entry(process.status.as_str().into()).or_default() += 1;
-        }
-        success(json!({
-            "project_id": project.id,
-            "process_count": processes.len(),
-            "running_count": processes.iter().filter(|process| process.status == ProcessStatus::Running).count(),
-            "by_status": by_status,
-        }))
-    }
-
-    #[tool(description = "Rename the effective or explicitly requested project")]
-    async fn rename_project(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectRenameArgs>,
+        Parameters(args): Parameters<ProjectUpdateArgs>,
     ) -> CallToolResult {
         if args.name.trim().is_empty() {
             return failure("invalid_project_name", "project name must not be empty");
@@ -399,7 +299,7 @@ impl WorkmanMcp {
                 Ok(project) => success(project),
                 Err(error) => failure(error.code(), error.to_string()),
             },
-            Err(error) => failure("project_rename_failed", error.to_string()),
+            Err(error) => failure("project_update_failed", error.to_string()),
         }
     }
 }
@@ -446,13 +346,7 @@ impl ServerHandler for WorkmanMcp {
             .tool_router
             .list_all()
             .into_iter()
-            .filter(|tool| {
-                !process_identity
-                    || !matches!(
-                        tool.name.as_ref(),
-                        "agent_tool_configure" | "agent_tool_configure_preview"
-                    )
-            })
+            .filter(|tool| !process_identity || tool.name.as_ref() != "agent_tool_configure")
             .map(sanitize_tool_schema)
             .collect();
         Ok(ListToolsResult {

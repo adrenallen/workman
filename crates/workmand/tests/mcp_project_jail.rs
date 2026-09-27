@@ -172,14 +172,12 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
     let identity = call(&client, "whoami", json!({})).await;
     assert_eq!(identity["process_id"], 10);
     assert_eq!(identity["effective_project_id"], 1);
-    let visible = call(&client, "list_projects", json!({})).await;
-    assert_eq!(visible["projects"].as_array().unwrap().len(), 1);
-    assert_eq!(visible["projects"][0]["id"], 1);
+    assert_eq!(identity["project"]["id"], 1);
 
     let spawned = call(
         &client,
-        "spawn_process",
-        json!({ "project_id": 1, "kind": "terminal", "name": "allowed-terminal" }),
+        "spawn_terminal",
+        json!({ "project_id": 1, "name": "allowed-terminal" }),
     )
     .await;
     let spawned_id = spawned["process_id"].as_i64().unwrap();
@@ -192,14 +190,17 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
 
     for (name, args) in [
         (
-            "spawn_process",
-            json!({ "project_id": 2, "kind": "terminal", "name": "escape" }),
+            "spawn_terminal",
+            json!({ "project_id": 2, "name": "escape" }),
         ),
         (
             "spawn_agent",
             json!({ "project_id": 2, "agent_tool_id": 999 }),
         ),
-        ("get_project", json!({ "project_id": 2 })),
+        (
+            "project_update",
+            json!({ "project_id": 2, "name": "foreign" }),
+        ),
         (
             "todo_create",
             json!({ "project_id": 2, "title": "foreign todo" }),
@@ -214,15 +215,18 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
         ),
         ("timer_list", json!({ "project_id": 2 })),
         (
-            "lock_acquire",
-            json!({ "project_id": 2, "lock_key": "foreign", "lease_ttl_seconds": 60 }),
+            "lock",
+            json!({ "project_id": 2, "action": "acquire", "lock_key": "foreign", "lease_ttl_seconds": 60 }),
         ),
         ("send_input", json!({ "process_id": 20, "input": "no" })),
         (
-            "set_notify_spawner_on_idle",
-            json!({ "process_id": 20, "enabled": true }),
+            "update_process",
+            json!({ "process_id": 20, "notify_spawner_on_idle": true }),
         ),
-        ("stop_process", json!({ "process_id": 20 })),
+        (
+            "process_control",
+            json!({ "process_id": 20, "action": "stop" }),
+        ),
     ] {
         let error = rejected(&client, name, args).await;
         assert_jailed(&error, 1);
@@ -237,8 +241,8 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
     assert_jailed(&delivery_error, 1);
     let watch_error = rejected(
         &client,
-        "timer_fire_when_idle_any",
-        json!({ "processes": [20], "max_wait_ms": 1000, "body": "no" }),
+        "timer_fire_when_idle",
+        json!({ "processes": [20], "max_wait_ms": 1000, "body": "no", "wait_for": "any" }),
     )
     .await;
     assert_jailed(&watch_error, 1);
@@ -249,15 +253,14 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
                 .auth_header(discovery.token.clone()),
         ))
         .await?;
-    assert_eq!(
-        call(&bearer, "list_projects", json!({})).await["projects"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2,
-        "list_projects remains discovery for a bearer-authenticated unidentified session"
-    );
-    let unidentified = rejected(&bearer, "get_project", json!({ "project_id": 2 })).await;
+    let bearer_identity = call(&bearer, "whoami", json!({})).await;
+    assert_eq!(bearer_identity["project"], Value::Null);
+    let unidentified = rejected(
+        &bearer,
+        "project_update",
+        json!({ "project_id": 2, "name": "foreign" }),
+    )
+    .await;
     assert_eq!(unidentified["code"], "project_scope_error");
     assert!(
         unidentified["message"]
@@ -280,8 +283,8 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
         spawned_id,
         rejected(
             &client,
-            "spawn_process",
-            json!({ "project_id": 2, "kind": "terminal", "name": "demo-escape" }),
+            "spawn_terminal",
+            json!({ "project_id": 2, "name": "demo-escape" }),
         )
         .await["message"]
             .as_str()

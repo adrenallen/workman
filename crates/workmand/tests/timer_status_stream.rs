@@ -459,11 +459,12 @@ async fn parent_waiting_on_working_child_reaches_every_status_consumer()
 
     let idle = call(
         &client,
-        "timer_fire_when_idle_any",
+        "timer_fire_when_idle",
         json!({
             "processes": [WORKER_ID],
             "max_wait_ms": 12_000,
             "body": "child finished",
+            "wait_for": "any",
         }),
     )
     .await;
@@ -561,11 +562,12 @@ async fn timer_status_stream_reconciles_every_lifecycle_path() -> Result<(), Box
 
     let idle = call(
         &client,
-        "timer_fire_when_idle_any",
+        "timer_fire_when_idle",
         json!({
             "processes": [WORKER_ID],
             "max_wait_ms": 12_000,
             "body": "early idle",
+            "wait_for": "any",
         }),
     )
     .await;
@@ -603,11 +605,12 @@ async fn timer_status_stream_reconciles_every_lifecycle_path() -> Result<(), Box
 
     let max_wait = call(
         &client,
-        "timer_fire_when_idle_any",
+        "timer_fire_when_idle",
         json!({
             "processes": [STALLED_ID],
             "max_wait_ms": 200,
             "body": "max wait",
+            "wait_for": "any",
         }),
     )
     .await;
@@ -656,7 +659,12 @@ async fn timer_status_stream_reconciles_every_lifecycle_path() -> Result<(), Box
     )
     .await;
     let controlled_id = controlled["timer"]["id"].as_i64().unwrap();
-    call(&client, "timer_pause", json!({ "timer_id": controlled_id })).await;
+    call(
+        &client,
+        "timer_pause",
+        json!({ "timer_id": controlled_id, "paused": true }),
+    )
+    .await;
     next_timer_status(&mut socket, |event| {
         lifecycle(event, "paused", Some(controlled_id), None)
             && event["timers"].as_array().is_some_and(|timers| {
@@ -668,8 +676,8 @@ async fn timer_status_stream_reconciles_every_lifecycle_path() -> Result<(), Box
     .await?;
     call(
         &client,
-        "timer_resume",
-        json!({ "timer_id": controlled_id }),
+        "timer_pause",
+        json!({ "timer_id": controlled_id, "paused": false }),
     )
     .await;
     next_timer_status(&mut socket, |event| {
@@ -690,11 +698,12 @@ async fn timer_status_stream_reconciles_every_lifecycle_path() -> Result<(), Box
 
     let immediate = call(
         &client,
-        "timer_fire_when_idle_all",
+        "timer_fire_when_idle",
         json!({
             "processes": [WORKER_ID],
             "max_wait_ms": 5_000,
             "body": "already idle",
+            "wait_for": "all",
         }),
     )
     .await;

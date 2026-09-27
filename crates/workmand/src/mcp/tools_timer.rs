@@ -32,9 +32,6 @@ struct TimerSetArgs {
     delay_ms: u64,
     /// Single-line prompt text submitted unmodified to the delivery agent as a fresh user turn. Keep it on one line so the target CLI processes it as one turn.
     body: String,
-    /// Repeat using delay_ms when repeat_every_ms is omitted.
-    #[serde(default, rename = "loop")]
-    loop_timer: bool,
     /// Optional repeat interval. Supplying it makes the timer repeat.
     #[serde(default)]
     repeat_every_ms: Option<u64>,
@@ -56,6 +53,15 @@ struct IdleTimerArgs {
     /// Agent process receiving the fresh prompt. Defaults to the calling process.
     #[serde(default)]
     delivery_process_id: Option<ProcessId>,
+    /// Whether any or every watched process must become idle.
+    wait_for: IdleWaitFor,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum IdleWaitFor {
+    Any,
+    All,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -81,6 +87,15 @@ struct TimerTargetArgs {
     timer_id: TimerId,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TimerPauseArgs {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    timer_id: TimerId,
+    /// true pauses the timer; false resumes it.
+    paused: bool,
+}
+
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct TimerListArgs {
     #[serde(default)]
@@ -92,7 +107,7 @@ struct TimerListArgs {
 #[tool_router(router = timer_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
     #[tool(
-        description = "Set a one-shot or repeating delayed prompt delivery. When using a timer that delivers to you as a wake-up, end your current turn after success; Workman submits body as a fresh user turn later, so do not poll while waiting."
+        description = "Set a one-shot or repeating delayed prompt delivery to the user; do not poll while waiting"
     )]
     async fn timer_set(
         &self,
@@ -123,7 +138,7 @@ impl WorkmanMcp {
             delivery.id,
             args.body,
             delay_ms,
-            args.loop_timer,
+            false,
             repeat_every_ms,
             now,
         ) {
@@ -142,25 +157,18 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Create a no-poll wake-up when any watched process has an unreported completion with work evidence since your last submitted input to it, later makes a fresh non-idle-to-idle transition, or reaches the hard deadline. Work evidence is adapter-recognized busy state or, for generic adapters, non-cosmetic output past the recent-input grace; generic adapters record at most one completion per submitted input. A process you never prompted still requires a fresh transition. Queued prompts defer completion recording. The result reports already_idle and satisfied_by diagnostics; timer_list retains them for non-immediate timers. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
+        description = "Arm a no-poll wake-up for any or every watched process, with a hard deadline"
     )]
-    async fn timer_fire_when_idle_any(
+    async fn timer_fire_when_idle(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<IdleTimerArgs>,
     ) -> CallToolResult {
-        self.set_idle_timer(&parts, args, TimerKind::IdleAny).await
-    }
-
-    #[tool(
-        description = "Create a no-poll wake-up once each watched process is idle at arm time or later reaches idle, or when the hard deadline expires. The result reports already_idle and satisfied_by diagnostics; timer_list retains them for non-immediate timers. Pending initial or queued prompts keep a process non-idle and invalidate any earlier idle satisfaction until delivery finishes and the process reaches idle again. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
-    )]
-    async fn timer_fire_when_idle_all(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<IdleTimerArgs>,
-    ) -> CallToolResult {
-        self.set_idle_timer(&parts, args, TimerKind::IdleAll).await
+        let kind = match args.wait_for {
+            IdleWaitFor::Any => TimerKind::IdleAny,
+            IdleWaitFor::All => TimerKind::IdleAll,
+        };
+        self.set_idle_timer(&parts, args, kind).await
     }
 
     #[tool(
@@ -195,27 +203,16 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Pause one active timer owned by this MCP process")]
+    #[tool(description = "Pause or resume one timer owned by this MCP process")]
     async fn timer_pause(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TimerTargetArgs>,
+        Parameters(args): Parameters<TimerPauseArgs>,
     ) -> CallToolResult {
-        self.change_timer_pause(&parts, args, true).await
+        self.change_timer_pause(&parts, args).await
     }
 
-    #[tool(description = "Resume one paused timer owned by this MCP process")]
-    async fn timer_resume(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TimerTargetArgs>,
-    ) -> CallToolResult {
-        self.change_timer_pause(&parts, args, false).await
-    }
-
-    #[tool(
-        description = "List all timers visible in the effective project, including owner process, schedule, watch list, and state; mutations remain owner-process-only"
-    )]
+    #[tool(description = "List visible timers with owners, schedules, watch lists, and state")]
     async fn timer_list(
         &self,
         Extension(parts): Extension<Parts>,
@@ -325,19 +322,14 @@ impl WorkmanMcp {
         }
     }
 
-    async fn change_timer_pause(
-        &self,
-        parts: &Parts,
-        args: TimerTargetArgs,
-        pause: bool,
-    ) -> CallToolResult {
+    async fn change_timer_pause(&self, parts: &Parts, args: TimerPauseArgs) -> CallToolResult {
         let mut registry = self.registry.lock().await;
         let (project, actor) = match scoped_project(&mut registry, parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
         let now = now_millis();
-        let result = if pause {
+        let result = if args.paused {
             TimerService::new(&mut registry).pause(&actor.id, project.id, args.timer_id, now)
         } else {
             TimerService::new(&mut registry).resume(&actor.id, project.id, args.timer_id, now)
@@ -345,7 +337,7 @@ impl WorkmanMcp {
         match result {
             Ok(timer) => {
                 self.timer_events.publish(TimerLifecycleEvent::for_timer(
-                    if pause {
+                    if args.paused {
                         TimerLifecycleKind::Paused
                     } else {
                         TimerLifecycleKind::Resumed

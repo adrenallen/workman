@@ -259,17 +259,14 @@ async fn websocket_reorder_is_scoped_and_mcp_order_survives_daemon_restart()
         .set_process_mcp_token(10, "alpha-process-token", 1_700_000_000_000)?;
     let (discovery, shutdown, task) = serve(restarted).await;
     let client = connect_mcp(&discovery, &discovery.token).await?;
-    let projects = mcp_call(&client, "list_projects", json!({})).await;
-    assert_eq!(ids(&projects["projects"]), [2, 1, 3]);
-    assert_eq!(projects["projects"][0]["sort_order"], 0);
-    assert_eq!(projects["projects"][1]["sort_order"], 1);
-    assert_eq!(projects["projects"][2]["sort_order"], 2);
+    let identity = mcp_call(&client, "whoami", json!({})).await;
+    assert_eq!(identity["project"], Value::Null);
 
     let _ = client.cancel().await;
     let client = connect_mcp(&discovery, "alpha-process-token").await?;
-    let projects = mcp_call(&client, "list_projects", json!({})).await;
-    assert_eq!(ids(&projects["projects"]), [1]);
-    assert_eq!(projects["projects"][0]["sort_order"], 1);
+    let identity = mcp_call(&client, "whoami", json!({})).await;
+    assert_eq!(identity["project"]["id"], 1);
+    assert_eq!(identity["project"]["sort_order"], 1);
 
     let processes = mcp_call(&client, "list_processes", json!({ "project_id": 1 })).await;
     let agents = processes["processes"]

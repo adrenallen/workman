@@ -432,7 +432,7 @@ fn animated_codex_completion_emits_once_while_the_pty_keeps_redrawing() {
 }
 
 #[test]
-fn garrett_click_in_click_out_selection_resize_replay_and_focus_reports_are_attention_neutral() {
+fn human_click_in_click_out_selection_resize_replay_and_focus_reports_are_attention_neutral() {
     let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
     pipeline.frame_at(1_000, CLAUDE_RESTING);
     let baseline = pipeline.observe_at(6_000);

@@ -116,6 +116,10 @@ struct TodoGetArgs {
     todo_id: TodoId,
     #[serde(default)]
     include_comments: bool,
+    #[serde(default)]
+    comments_offset: Option<usize>,
+    #[serde(default)]
+    comments_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -133,6 +137,21 @@ struct TodoUpdateArgs {
     status: Option<TodoStatusArg>,
     #[serde(default)]
     tags: Option<Vec<String>>,
+    /// Add tags without replacing existing tags.
+    #[serde(default)]
+    add_tags: Option<Vec<String>>,
+    /// Remove tags without replacing other tags.
+    #[serde(default)]
+    remove_tags: Option<Vec<String>>,
+    /// Replace the full blocker list.
+    #[serde(default)]
+    blocker_ids: Option<Vec<TodoId>>,
+    /// Add blockers without replacing existing blockers.
+    #[serde(default)]
+    add_blocker_ids: Option<Vec<TodoId>>,
+    /// Remove blockers without replacing other blockers.
+    #[serde(default)]
+    remove_blocker_ids: Option<Vec<TodoId>>,
     /// Assign to the human with `user`, or clear with `none`; omit to preserve.
     #[serde(default)]
     assignee: Option<String>,
@@ -173,37 +192,9 @@ struct TodoListArgs {
     offset: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct TodoTagArgs {
+    /// Include the project's distinct todo tags beside the page.
     #[serde(default)]
-    project_id: Option<ProjectId>,
-    todo_id: TodoId,
-    tag: String,
-    #[serde(default)]
-    response_mode: Option<ResponseMode>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct TodoSetBlockersArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    todo_id: TodoId,
-    #[serde(default)]
-    blocker_ids: Option<Vec<TodoId>>,
-    #[serde(default)]
-    response_mode: Option<ResponseMode>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct TodoBlockerArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    todo_id: TodoId,
-    blocker_id: TodoId,
-    #[serde(default)]
-    response_mode: Option<ResponseMode>,
+    include_tags: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -234,17 +225,6 @@ struct TodoCommentDeleteArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct TodoCommentListArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    todo_id: TodoId,
-    #[serde(default)]
-    offset: Option<usize>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct TodoLockArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
@@ -260,18 +240,6 @@ struct TodoWriteArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
     todo_id: TodoId,
-    #[serde(default)]
-    response_mode: Option<ResponseMode>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct TodoAssignArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    todo_id: TodoId,
-    /// Assign to the human with `user`; omit, use null, or use `none` to clear.
-    #[serde(default)]
-    assignee: Option<String>,
     #[serde(default)]
     response_mode: Option<ResponseMode>,
 }
@@ -341,33 +309,7 @@ impl WorkmanMcp {
         todo_response(todo, args.response_mode)
     }
 
-    #[tool(
-        description = "Assign a todo to the human with assignee=user, or omit assignee/use none to unassign"
-    )]
-    async fn todo_assign(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TodoAssignArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let actor_label = actor_label(registry.store(), &actor);
-        match TodoService::new(registry.store()).assign(
-            project.id,
-            args.todo_id,
-            args.assignee,
-            &actor_label,
-            now_millis(),
-        ) {
-            Ok(todo) => todo_response(todo, args.response_mode),
-            Err(error) => todo_failure(error),
-        }
-    }
-
-    #[tool(description = "Read one todo and optionally include its comments")]
+    #[tool(description = "Read one todo, optionally with a paginated comment page")]
     async fn todo_get(
         &self,
         Extension(parts): Extension<Parts>,
@@ -382,21 +324,25 @@ impl WorkmanMcp {
         let now = now_millis();
         match service.get(project.id, args.todo_id, now) {
             Ok(Some(todo)) if args.include_comments => {
-                let mut comments = Vec::new();
-                let mut offset = 0;
-                loop {
-                    match service.comment_list(project.id, args.todo_id, offset, Some(200), now) {
-                        Ok(page) => {
-                            comments.extend(page.comments);
-                            match page.next_offset {
-                                Some(next_offset) => offset = next_offset,
-                                None => break,
-                            }
-                        }
-                        Err(error) => return todo_failure(error),
-                    }
+                match service.comment_list(
+                    project.id,
+                    args.todo_id,
+                    args.comments_offset.unwrap_or(0),
+                    args.comments_limit,
+                    now,
+                ) {
+                    Ok(page) => success(json!({
+                        "found": true,
+                        "todo": todo,
+                        "comments": page.comments,
+                        "comments_total_count": page.total_count,
+                        "comments_offset": page.offset,
+                        "comments_limit": page.limit,
+                        "comments_has_more": page.has_more,
+                        "comments_next_offset": page.next_offset,
+                    })),
+                    Err(error) => todo_failure(error),
                 }
-                success(json!({ "found": true, "todo": todo, "comments": comments }))
             }
             Ok(Some(todo)) => success(json!({ "found": true, "todo": todo })),
             Ok(None) => success(json!({ "found": false, "todo": null })),
@@ -405,7 +351,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Update todo fields; assignee=user assigns the human, assignee=none clears, omitted fields are preserved"
+        description = "Update todo fields, assignment, tags, or blockers; omitted fields are preserved"
     )]
     async fn todo_update(
         &self,
@@ -436,7 +382,7 @@ impl WorkmanMcp {
             Ok(todo) => todo,
             Err(error) => return todo_failure(error),
         };
-        let todo = match args.assignee {
+        let mut todo = match args.assignee {
             Some(assignee) => match service.assign(
                 project.id,
                 args.todo_id,
@@ -449,6 +395,37 @@ impl WorkmanMcp {
             },
             None => updated,
         };
+        for tag in args.add_tags.unwrap_or_default() {
+            todo = match service.add_tag(project.id, args.todo_id, tag, now_millis()) {
+                Ok(todo) => todo,
+                Err(error) => return todo_failure(error),
+            };
+        }
+        for tag in args.remove_tags.unwrap_or_default() {
+            todo = match service.remove_tag(project.id, args.todo_id, tag, now_millis()) {
+                Ok(todo) => todo,
+                Err(error) => return todo_failure(error),
+            };
+        }
+        if let Some(blocker_ids) = args.blocker_ids {
+            todo = match service.set_blockers(project.id, args.todo_id, blocker_ids, now_millis()) {
+                Ok(todo) => todo,
+                Err(error) => return todo_failure(error),
+            };
+        }
+        for blocker_id in args.add_blocker_ids.unwrap_or_default() {
+            todo = match service.add_blocker(project.id, args.todo_id, blocker_id, now_millis()) {
+                Ok(todo) => todo,
+                Err(error) => return todo_failure(error),
+            };
+        }
+        for blocker_id in args.remove_blocker_ids.unwrap_or_default() {
+            todo = match service.remove_blocker(project.id, args.todo_id, blocker_id, now_millis())
+            {
+                Ok(todo) => todo,
+                Err(error) => return todo_failure(error),
+            };
+        }
         todo_response(todo, args.response_mode)
     }
 
@@ -493,7 +470,7 @@ impl WorkmanMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         let service = TodoService::new(registry.store());
-        match service.list(
+        let page = match service.list(
             project.id,
             TodoListQuery {
                 status,
@@ -509,85 +486,24 @@ impl WorkmanMcp {
             },
             now_millis(),
         ) {
-            Ok(page) => success(page),
-            Err(error) => todo_failure(error),
-        }
-    }
-
-    #[tool(description = "List distinct todo tags in a project")]
-    async fn todo_tags_list(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<super::ProjectScopeArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
+            Ok(page) => page,
+            Err(error) => return todo_failure(error),
         };
-        match TodoService::new(registry.store()).tags_list(project.id) {
-            Ok(tags) => success(json!({ "tags": tags })),
-            Err(error) => todo_failure(error),
+        if args.include_tags {
+            match service.tags_list(project.id) {
+                Ok(tags) => {
+                    let mut result = serde_json::to_value(page).expect("todo page serializes");
+                    result
+                        .as_object_mut()
+                        .expect("todo page is an object")
+                        .insert("tags".into(), json!(tags));
+                    success(result)
+                }
+                Err(error) => todo_failure(error),
+            }
+        } else {
+            success(page)
         }
-    }
-
-    #[tool(description = "Add one tag without replacing other tags")]
-    async fn todo_add_tag(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TodoTagArgs>,
-    ) -> CallToolResult {
-        self.todo_tag_change(parts, args, true).await
-    }
-
-    #[tool(description = "Remove one tag without replacing other tags")]
-    async fn todo_remove_tag(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TodoTagArgs>,
-    ) -> CallToolResult {
-        self.todo_tag_change(parts, args, false).await
-    }
-
-    #[tool(description = "Replace a todo's full blocker list")]
-    async fn todo_set_blockers(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TodoSetBlockersArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let service = TodoService::new(registry.store());
-        match service.set_blockers(
-            project.id,
-            args.todo_id,
-            args.blocker_ids.unwrap_or_default(),
-            now_millis(),
-        ) {
-            Ok(todo) => todo_response(todo, args.response_mode),
-            Err(error) => todo_failure(error),
-        }
-    }
-
-    #[tool(description = "Add one blocker without replacing other blockers")]
-    async fn todo_add_blocker(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TodoBlockerArgs>,
-    ) -> CallToolResult {
-        self.todo_blocker_change(parts, args, true).await
-    }
-
-    #[tool(description = "Remove one blocker without replacing other blockers")]
-    async fn todo_remove_blocker(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TodoBlockerArgs>,
-    ) -> CallToolResult {
-        self.todo_blocker_change(parts, args, false).await
     }
 
     #[tool(description = "Add a todo comment; mention @user to notify the human")]
@@ -669,29 +585,6 @@ impl WorkmanMcp {
                 "todo_id": todo_id,
                 "comment_id": args.comment_id,
             })),
-            Err(error) => todo_failure(error),
-        }
-    }
-
-    #[tool(description = "List comments for a todo with optional pagination")]
-    async fn todo_comment_list(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TodoCommentListArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        match TodoService::new(registry.store()).comment_list(
-            project.id,
-            args.todo_id,
-            args.offset.unwrap_or(0),
-            args.limit,
-            now_millis(),
-        ) {
-            Ok(page) => success(page),
             Err(error) => todo_failure(error),
         }
     }
@@ -780,52 +673,6 @@ impl WorkmanMcp {
                 "completed": args.completed,
                 "affected_todo_ids": affected_todo_ids,
             })),
-            Err(error) => todo_failure(error),
-        }
-    }
-
-    async fn todo_tag_change(&self, parts: Parts, args: TodoTagArgs, add: bool) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let service = TodoService::new(registry.store());
-        let result = if add {
-            service.add_tag(project.id, args.todo_id, args.tag.clone(), now_millis())
-        } else {
-            service.remove_tag(project.id, args.todo_id, args.tag.clone(), now_millis())
-        };
-        match result {
-            Ok(todo) if matches!(args.response_mode, Some(ResponseMode::Rich)) => success(todo),
-            Ok(_) => success(json!({
-                "project_id": project.id,
-                "todo_id": args.todo_id,
-                "tag": args.tag.trim(),
-            })),
-            Err(error) => todo_failure(error),
-        }
-    }
-
-    async fn todo_blocker_change(
-        &self,
-        parts: Parts,
-        args: TodoBlockerArgs,
-        add: bool,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let service = TodoService::new(registry.store());
-        let result = if add {
-            service.add_blocker(project.id, args.todo_id, args.blocker_id, now_millis())
-        } else {
-            service.remove_blocker(project.id, args.todo_id, args.blocker_id, now_millis())
-        };
-        match result {
-            Ok(todo) => todo_response(todo, args.response_mode),
             Err(error) => todo_failure(error),
         }
     }

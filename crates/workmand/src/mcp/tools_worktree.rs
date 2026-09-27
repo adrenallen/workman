@@ -7,7 +7,6 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
-use serde_json::json;
 use workman_core::ProjectId;
 
 use super::{WorkmanMcp, failure, scoped_project, success};
@@ -33,7 +32,7 @@ struct WorktreeForgetEnvArgs {
 #[tool_router(router = worktree_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
     #[tool(
-        description = "List every Git worktree for the effective repository, including registration, branch, cleanliness, ownership, and import/remove capabilities"
+        description = "List Git worktrees with registration, branch, cleanliness, and ownership"
     )]
     async fn worktree_list(
         &self,
@@ -98,12 +97,5 @@ async fn scoped_project_id(
 }
 
 fn worktree_failure(error: WorktreeError) -> CallToolResult {
-    match error {
-        WorktreeError::CreateConflict(conflict) => CallToolResult::structured_error(json!({
-            "code": "worktree_create_conflict",
-            "message": conflict.to_string(),
-            "conflict": conflict,
-        })),
-        error => failure(error.code(), error.to_string()),
-    }
+    failure(error.code(), error.to_string())
 }

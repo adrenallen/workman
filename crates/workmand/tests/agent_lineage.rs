@@ -226,15 +226,15 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
     assert_eq!(first_child_status["notify_spawner_on_idle"], true);
     let toggled_off = call(
         &parent,
-        "set_notify_spawner_on_idle",
-        json!({ "process_id": first_child_id, "enabled": false }),
+        "update_process",
+        json!({ "process_id": first_child_id, "notify_spawner_on_idle": false }),
     )
     .await;
     assert_eq!(toggled_off["notify_spawner_on_idle"], false);
     let toggled_on = call(
         &parent,
-        "set_notify_spawner_on_idle",
-        json!({ "process_id": first_child_id, "enabled": true }),
+        "update_process",
+        json!({ "process_id": first_child_id, "notify_spawner_on_idle": true }),
     )
     .await;
     assert_eq!(toggled_on["notify_spawner_on_idle"], true);
@@ -266,16 +266,16 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
     let second_child_id = second_child_spawn["process_id"].as_i64().unwrap();
     let error = rejected(
         &first_child,
-        "set_notify_spawner_on_idle",
-        json!({ "process_id": second_child_id, "enabled": true }),
+        "update_process",
+        json!({ "process_id": second_child_id, "notify_spawner_on_idle": true }),
     )
     .await;
     assert_eq!(error["code"], "not_process_spawner");
 
     let terminal_spawn = call(
         &parent,
-        "spawn_process",
-        json!({ "kind": "terminal", "name": "child-terminal" }),
+        "spawn_terminal",
+        json!({ "name": "child-terminal" }),
     )
     .await;
     let terminal_id = terminal_spawn["process_id"].as_i64().unwrap();
@@ -373,8 +373,8 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
     // The legacy false field is deliberately ignored: cascade is the only behavior.
     call(
         &root,
-        "stop_process",
-        json!({ "project_id": 7, "process_id": parent_id, "cascade": false }),
+        "process_control",
+        json!({ "project_id": 7, "process_id": parent_id, "action": "stop" }),
     )
     .await;
     let after_cascade = call(&root, "list_processes", json!({ "project_id": 7 })).await;
@@ -433,8 +433,8 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
     ] {
         call(
             &root,
-            "start_process",
-            json!({ "project_id": 7, "process_id": process_id }),
+            "process_control",
+            json!({ "project_id": 7, "process_id": process_id, "action": "start" }),
         )
         .await;
     }

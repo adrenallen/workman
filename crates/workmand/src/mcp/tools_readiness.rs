@@ -23,19 +23,6 @@ struct ServicesListArgs {
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-struct ProcessPortsArgs {
-    /// Process ID. Omit with process_name to target this MCP session's own process.
-    #[serde(default)]
-    process_id: Option<ProcessId>,
-    /// Exact process name; numeric values and names ending in `--<id>` also resolve by ID.
-    #[serde(default)]
-    process_name: Option<String>,
-    /// Optional project scope override.
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-}
-
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct WaitForBoundPortArgs {
     /// Process ID. Omit with process_name to target this MCP session's own process.
     #[serde(default)]
@@ -73,33 +60,6 @@ impl WorkmanMcp {
             .await
         {
             Ok(services) => success(json!({ "services": services })),
-            Err(error) => readiness_failure(error),
-        }
-    }
-
-    #[tool(description = "Get listeners, ports, localhost URLs, and readiness for one process")]
-    async fn get_process_ports(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProcessPortsArgs>,
-    ) -> CallToolResult {
-        let process_id = match resolve_target(
-            self,
-            &parts,
-            args.process_id,
-            args.process_name.as_deref(),
-            args.project_id,
-        )
-        .await
-        {
-            Ok(process_id) => process_id,
-            Err(error) => return error,
-        };
-        match ReadinessService::default()
-            .get_process_ports(&self.registry, process_id)
-            .await
-        {
-            Ok(service) => success(service),
             Err(error) => readiness_failure(error),
         }
     }

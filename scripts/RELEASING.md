@@ -49,7 +49,7 @@ revoke the previous API key. Apple exposes a `.p8` download once, so keep the lo
 in the team's approved secret store.
 
 The `/download` page shows the legacy Gatekeeper workaround only for versions 0.1.4 and earlier.
-Do not deploy that Worker change ahead of the first signed release; Garrett owns the v0.1.5
+Do not deploy that Worker change ahead of the first signed release; the release owner owns the v0.1.5
 release and deployment decision.
 
 ## Windows archive

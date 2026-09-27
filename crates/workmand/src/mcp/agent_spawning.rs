@@ -85,33 +85,14 @@ const AGENT_TEMPLATE_EXTRA_ARGS_MAX_BYTES: usize = 4 * 1024;
 const INITIAL_PROMPT_MAX_BYTES: usize = 64 * 1024;
 const MODEL_MAX_BYTES: usize = 512;
 
-#[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum SpawnKind {
-    Terminal,
-    Agent,
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct SpawnProcessArgs {
+struct SpawnTerminalArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Only interactive terminals and managed agents may be launched through this tool.
-    kind: SpawnKind,
     /// Optional per-launch process name, unique within the project.
     #[serde(default)]
     name: Option<String>,
-    /// Agent-tool registry ID. Required for kind=agent and rejected for kind=terminal.
-    #[serde(default)]
-    agent_tool_id: Option<AgentToolId>,
-    /// Safely shell-quoted arguments appended to the registered agent command.
-    #[serde(default)]
-    extra_args: Vec<String>,
-    /// Automatically accept narrowly recognized first-run trust dialogs. For Kimi, this also
-    /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
-    #[serde(default = "default_true")]
-    auto_acknowledge_dialogs: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -119,12 +100,12 @@ struct SpawnAgentArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Agent-tool registry ID. Required unless agent_template_id is set; with a template it
-    /// overrides the template's agent while carrying supported model and effort settings.
+    /// Agent-tool registry ID. Required unless agent_template_id is set. A template tool override
+    /// carries model only within the same agent type; compatible effort may carry.
     #[serde(default)]
     agent_tool_id: Option<AgentToolId>,
-    /// Numeric template ID from list_agent_templates. Use a template only when the user names one
-    /// or explicitly asks for one.
+    /// Numeric template ID from list_agent_tools.agent_templates. Use a template only when the
+    /// user names one or explicitly asks for one.
     #[serde(default)]
     agent_template_id: Option<AgentTemplateId>,
     /// Optional per-launch process name, unique within the project.
@@ -162,25 +143,27 @@ struct SpawnAgentArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct AgentToolConfigArgs {
-    agent_tool_id: AgentToolId,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct AgentToolConfigWriteArgs {
+struct AgentToolConfigureArgs {
     agent_tool_id: AgentToolId,
     /// Must be true after the complete resulting config has been shown to the user.
-    confirm_write: bool,
-    /// SHA-256 returned by agent_tool_configure_preview; prevents stale writes.
-    expected_preview_sha256: String,
+    #[serde(default)]
+    confirm_write: Option<bool>,
+    /// SHA-256 returned by the preview call; prevents stale writes.
+    #[serde(default)]
+    expected_preview_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct AgentToolDeepCheckArgs {
+struct AgentToolCheckArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    agent_tool_id: AgentToolId,
+    /// Run the ephemeral whoami roundtrip instead of the cheap health checks.
+    #[serde(default)]
+    deep: bool,
+    /// Required when deep=true.
+    #[serde(default)]
+    agent_tool_id: Option<AgentToolId>,
     /// Hard deadline for the ephemeral whoami roundtrip (default 30s, maximum 60s).
     #[serde(default)]
     timeout_ms: Option<u64>,
@@ -387,91 +370,29 @@ impl McpLaunchAdapter {
 #[tool_router(router = agent_spawning_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
     #[tool(
-        description = "List enabled and disabled built-in or custom agent command presets. Returns { agent_tools: [...] }"
+        description = "List agent tools and optional templates; templates include launch settings"
     )]
     async fn list_agent_tools(&self) -> CallToolResult {
         let registry = self.registry.lock().await;
-        match load_agent_tools(&registry) {
-            Ok(tools) => success(json!({ "agent_tools": tools })),
-            Err(error) => failure("store_error", error),
+        match (
+            load_agent_tools(&registry),
+            load_agent_template_summaries(&registry),
+        ) {
+            (Ok(tools), Ok(templates)) => success(json!({
+                "agent_tools": tools,
+                "agent_templates": templates,
+            })),
+            (Err(error), _) | (_, Err(error)) => failure("store_error", error),
         }
     }
 
     #[tool(
-        description = "List compact reusable agent-template choices for the active workspace profile. Templates are optional: use one only when the user names one or explicitly asks for one; otherwise spawn a plain agent. Pass the selected id as spawn_agent.agent_template_id. Returns { agent_templates: [{ id, name, default_agent { agent_tool_id, name, tool_type, enabled }, launch { agent_tool_id, agent_tool_name, model, effort }, prompt_preview, extra_args }] } without full prompts; model and effort use \"agent default\" when unset, and a trailing … marks a truncated preview."
-    )]
-    async fn list_agent_templates(&self) -> CallToolResult {
-        let registry = self.registry.lock().await;
-        match load_agent_template_summaries(&registry) {
-            Ok(templates) => success(json!({ "agent_templates": templates })),
-            Err(error) => failure("store_error", error),
-        }
-    }
-
-    #[tool(
-        description = "Run cheap PATH, version, and config-presence checks for every agent runtime"
-    )]
-    async fn agent_tools_health(&self) -> CallToolResult {
-        let (tools, user_environment) = {
-            let registry = self.registry.lock().await;
-            match load_agent_tools(&registry) {
-                Ok(tools) => (tools, registry.resolved_user_environment()),
-                Err(error) => return failure("store_error", error),
-            }
-        };
-        success(
-            crate::runtime_doctor::check_agent_tools_with_user_environment(
-                tools,
-                &user_environment,
-            )
-            .await,
-        )
-    }
-
-    #[tool(
-        description = "Preview the complete consent-gated workman MCP config for one agent runtime (global configuration is unavailable to agent identities)"
-    )]
-    async fn agent_tool_configure_preview(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<AgentToolConfigArgs>,
-    ) -> CallToolResult {
-        let tool = {
-            let mut registry = self.registry.lock().await;
-            let (actor, _) = match ensure_actor(&mut registry, &parts) {
-                Ok(identity) => identity,
-                Err(error) => return failure("identity_error", error),
-            };
-            match process_project_id(&registry, &actor) {
-                Ok(Some(project_id)) => {
-                    return failure(
-                        "project_scope_error",
-                        format!(
-                            "agent identities are scoped to project {project_id}; inspecting global agent configuration is outside that scope"
-                        ),
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => return failure("project_scope_error", error),
-            }
-            match load_agent_tool(&registry, args.agent_tool_id) {
-                Ok(tool) => tool,
-                Err(error) => return failure("agent_tool_error", error),
-            }
-        };
-        match crate::runtime_doctor::config_preview(&tool, &self.mcp_url) {
-            Ok(preview) => success(preview),
-            Err(error) => failure("agent_config_error", error),
-        }
-    }
-
-    #[tool(
-        description = "Write a previously previewed agent MCP config after explicit confirmation (global configuration is unavailable to agent identities)"
+        description = "Preview or confirm a consent-gated agent MCP config; unavailable to agent identities"
     )]
     async fn agent_tool_configure(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<AgentToolConfigWriteArgs>,
+        Parameters(args): Parameters<AgentToolConfigureArgs>,
     ) -> CallToolResult {
         let tool = {
             let mut registry = self.registry.lock().await;
@@ -496,25 +417,54 @@ impl WorkmanMcp {
                 Err(error) => return failure("agent_tool_error", error),
             }
         };
+        if !args.confirm_write.unwrap_or(false) {
+            return match crate::runtime_doctor::config_preview(&tool, &self.mcp_url) {
+                Ok(preview) => success(preview),
+                Err(error) => failure("agent_config_error", error),
+            };
+        }
+        let Some(expected_preview_sha256) = args.expected_preview_sha256.as_deref() else {
+            return failure(
+                "invalid_params",
+                "expected_preview_sha256 is required when confirm_write=true",
+            );
+        };
         match crate::runtime_doctor::apply_config(
             &tool,
             &self.mcp_url,
-            args.confirm_write,
-            &args.expected_preview_sha256,
+            true,
+            expected_preview_sha256,
         ) {
             Ok(result) => success(result),
             Err(error) => failure("agent_config_error", error),
         }
     }
 
-    #[tool(
-        description = "Optionally spawn one ephemeral agent and verify its workman whoami roundtrip"
-    )]
-    async fn agent_tool_deep_check(
+    #[tool(description = "Check agent runtimes; deep=true verifies one ephemeral whoami roundtrip")]
+    async fn agent_tool_check(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<AgentToolDeepCheckArgs>,
+        Parameters(args): Parameters<AgentToolCheckArgs>,
     ) -> CallToolResult {
+        if !args.deep {
+            let (tools, user_environment) = {
+                let registry = self.registry.lock().await;
+                match load_agent_tools(&registry) {
+                    Ok(tools) => (tools, registry.resolved_user_environment()),
+                    Err(error) => return failure("store_error", error),
+                }
+            };
+            return success(
+                crate::runtime_doctor::check_agent_tools_with_user_environment(
+                    tools,
+                    &user_environment,
+                )
+                .await,
+            );
+        }
+        let Some(agent_tool_id) = args.agent_tool_id else {
+            return failure("invalid_params", "agent_tool_id is required when deep=true");
+        };
         let (project_id, spawned_by_process_id) = {
             let mut registry = self.registry.lock().await;
             match scoped_project(&mut registry, &parts, args.project_id) {
@@ -525,7 +475,7 @@ impl WorkmanMcp {
         match deep_check_registered_agent(
             self.registry.clone(),
             project_id,
-            args.agent_tool_id,
+            agent_tool_id,
             &self.mcp_url,
             args.timeout_ms,
             spawned_by_process_id,
@@ -537,11 +487,11 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Spawn a managed interactive terminal or registered agent process")]
-    async fn spawn_process(
+    #[tool(description = "Spawn a managed interactive terminal")]
+    async fn spawn_terminal(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<SpawnProcessArgs>,
+        Parameters(args): Parameters<SpawnTerminalArgs>,
     ) -> CallToolResult {
         let (project, spawned_by_process_id) = {
             let mut registry = self.registry.lock().await;
@@ -551,67 +501,25 @@ impl WorkmanMcp {
             }
         };
 
-        let result = match args.kind {
-            SpawnKind::Terminal => {
-                if args.agent_tool_id.is_some() {
-                    return failure(
-                        "invalid_arguments",
-                        "agent_tool_id is only valid when kind=agent",
-                    );
-                }
-                if !args.extra_args.is_empty() {
-                    return failure(
-                        "invalid_arguments",
-                        "extra_args is only valid when kind=agent",
-                    );
-                }
-                let mut registry = self.registry.lock().await;
-                process_name(&registry, project.id, args.name, "terminal").and_then(|name| {
-                    let shell = registry
-                        .resolved_user_environment()
-                        .active_shell()
-                        .to_string_lossy()
-                        .into_owned();
-                    spawn(
-                        &mut registry,
-                        &project,
-                        ProcessKind::Terminal,
-                        name,
-                        shell,
-                        None,
-                        BTreeMap::new(),
-                        spawned_by_process_id,
-                        false,
-                    )
-                })
-            }
-            SpawnKind::Agent => {
-                let Some(agent_tool_id) = args.agent_tool_id else {
-                    return failure(
-                        "agent_tool_required",
-                        "agent_tool_id is required when kind=agent",
-                    );
-                };
-                spawn_registered_agent(
-                    self.registry.clone(),
-                    project,
-                    Some(agent_tool_id),
-                    None,
-                    args.name,
-                    args.extra_args,
-                    None,
-                    None,
-                    Vec::new(),
-                    false,
-                    AttachmentSourceScope::McpProject,
-                    &self.mcp_url,
-                    args.auto_acknowledge_dialogs,
-                    spawned_by_process_id,
-                    false,
-                )
-                .await
-            }
-        };
+        let mut registry = self.registry.lock().await;
+        let result = process_name(&registry, project.id, args.name, "terminal").and_then(|name| {
+            let shell = registry
+                .resolved_user_environment()
+                .active_shell()
+                .to_string_lossy()
+                .into_owned();
+            spawn(
+                &mut registry,
+                &project,
+                ProcessKind::Terminal,
+                name,
+                shell,
+                None,
+                BTreeMap::new(),
+                spawned_by_process_id,
+                false,
+            )
+        });
         match result {
             Ok(result) => success(result),
             Err(error) => failure("spawn_failed", error),
@@ -619,7 +527,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Template: set agent_template_id only; the template supplies its agent tool, model, effort, launch args and prompt, and initial_prompt is appended. Pass model or agent_tool_id only to override. Use agent_template_id only when the user names a template or explicitly asks for one. A tool override keeps the template's model only for the same agent type, carries effort between Claude and Codex, keeps the prompt, and reports everything else in resolved.template_args_skipped. Set notify_spawner_on_idle=true for prospective, coalesced, paste-safe turns to this direct agent spawner when the child finishes work after this spawner's submitted input, needs input, exits, or crashes; the opt-in survives child restart, generic adapters cap Finished once per child input while busy-detecting adapters may report a later real end after fresh busy evidence, a child parked Waiting on its own active timer is not finished, delivery waits behind human drafts (positive drafts indefinitely, unknown composers for 120 seconds after human input), and no idle timer is needed unless a deadline matters. An explicit pending idle timer wins only for Finished when it is active, unpaused, owned by the spawner, and watches that child, even when it delivers elsewhere. model is an optional per-launch override; omit it to use the template or agent default, and reserve extra_args for other raw flags."
+        description = "Spawn an agent from a tool or optional template listed by list_agent_tools. Overrides carry model only within the same agent type and never carry command defaults; only caller model replaces flags. resolved reports choices and skips. notify_spawner_on_idle avoids an idle timer unless a deadline matters."
     )]
     async fn spawn_agent(
         &self,

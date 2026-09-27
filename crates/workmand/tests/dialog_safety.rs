@@ -545,11 +545,12 @@ async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions(
     );
     let immediate = call(
         &timer_client,
-        "timer_fire_when_idle_all",
+        "timer_fire_when_idle",
         json!({
             "processes": [process_id],
             "max_wait_ms": 30_000,
-            "body": body
+            "body": body,
+            "wait_for": "all"
         }),
     )
     .await;

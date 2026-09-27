@@ -72,7 +72,7 @@ stays up with the window closed; the CLI gets the same API as the UI; headless/r
 stays possible. The UI process is disposable.
 
 **Terminal pipeline:** the daemon is the single source of truth for terminal state. Every PTY's
-raw bytes go to (a) a bounded raw ring buffer (powers `get_process_raw_output` / raw search),
+raw bytes go to (a) a bounded raw ring buffer (powers raw `get_process_output` and search),
 and (b) an `alacritty_terminal` emulator instance (powers rendered output, rendered search, and
 the MCP's `get_process_output`). The UI *also* receives the raw byte stream over the control
 socket (bridged through the Tauri Rust side) and feeds it to **xterm.js + WebGL addon** for
@@ -127,31 +127,25 @@ Mirror Solo's tool surface and semantics — they're well designed and already v
 - **Identity**: every process the daemon spawns gets `WORKMAN_PROCESS_ID` plus a unique
   `WORKMAN_MCP_TOKEN` in its env. The agent's MCP config sends the token as a header (client
   configs support `${VAR}` expansion), so the daemon maps each HTTP session to the process
-  that owns it automatically; `whoami` reports process_id, actor_id, and effective project;
-  `identify_session` stays as the manual fallback for externally launched sessions.
-- **Scoping**: explicit `project_id` param → session-selected project → identified process's
-  project. Every project-scoped tool takes an optional `project_id` override.
-- **Tool catalog** (v1, mirroring Solo's categories):
-  - *setup*: help (topic-based), whoami, identify_session, mcp_tools_summary,
-    mcp_smoke_test (disposable write-read-cleanup self-test)
-  - *projects*: list/select/get/status/stats, create (register existing dir), rename,
-    delete (confirm-gated; second confirm if processes are running)
-  - *processes*: list, status, start/stop/restart, close (self-close confirm), rename,
-    select (focus in UI), start/stop/restart_all_commands
-  - *output*: get rendered (row-ranged), get raw, search both, clear, send_input
-    (text or raw bytes, submit flag, optional wait_ms returning the fresh tail)
-  - *spawning*: list_agent_tools, spawn_process(kind=terminal|agent), spawn_agent —
-    returns process_id + `agent_instructions` preamble the caller prepends to prompt #1
-  - *readiness*: services_list, get_process_ports, wait_for_bound_port
-  - *todos*: full CRUD + tags + blockers + comments + lock/unlock + complete + transfer;
+  that owns it automatically; `whoami` reports process_id, actor_id, and project metadata.
+- **Scoping**: the identified process's project is authoritative. Schemas omit `project_id`, while
+  callers that still send it are validated against that project.
+- **Tool catalog**:
+  - *setup*: `help`, `whoami`, and `project_update`
+  - *processes*: `list_processes`, `get_process_status`, `process_control`, `close_process`,
+    `update_process`, and `commands_control`
+  - *output*: `get_process_output` and `search_output` select raw data with `raw=true`, plus
+    `clear_output` and `send_input`
+  - *spawning*: `list_agent_tools`, `spawn_terminal`, and `spawn_agent`; spawn results contain
+    process identity plus resolved launch settings when applicable
+  - *readiness*: `services_list` and `wait_for_bound_port`; process status can include ports
+  - *todos*: CRUD + merged tags/blockers/comments + lock/unlock + complete;
     writes return **slim receipts** (`{project_id, todo_id}`) by default, `response_mode=rich`
     opt-in — keeps orchestrator context windows lean
-  - *scratchpads*: write/read/append/append_section/edit(section-or-line-range)/find/tail/
-    list/rename/tags/archive/clear/delete/transfer, save_to_file/load_from_file —
-    all mutations take `expected_revision`
-  - *coordination*: lock_acquire/release/status
-  - *timers*: timer_set (delay, loop, repeat_every_ms, delivery_process_id),
-    timer_fire_when_idle_any/all (watch list + max_wait guard), cancel/pause/resume/list
+  - *scratchpads*: write/read/append/edit/find/list/update/delete, comments, and file save/load;
+    revision-sensitive mutations take `expected_revision`
+  - *coordination*: `lock` with an acquire, release, or status action
+  - *timers*: `timer_set`, `timer_fire_when_idle` with required any/all mode, cancel, pause, and list
 - **Timer delivery contract**: when a timer fires, its `body` is injected into the delivery
   agent's PTY as if the user typed it — a fresh user turn. This plus idle-watching is the whole
   orchestration trick: "wake me when the worker goes quiet" with zero polling.
@@ -239,20 +233,20 @@ restart_when_changed via glob watching, env injection, saved-command click-to-ru
 *Done when: cloning a repo with workman.yml and trusting it brings up the whole stack.*
 
 **M3 — MCP server: identity + process/output/readiness tools.**
-rmcp streamable HTTP on localhost; whoami/identify/help; project scoping rules; the full
+rmcp streamable HTTP on localhost; identity/help; project scoping rules; the full
 process/output/spawning(terminal)/readiness tool set. Register with Claude Code and drive real
-sessions. *Done when: an agent can restart my dev server, wait_for_bound_port, read the log
+sessions. *Done when: an agent can restart the user's dev server, wait_for_bound_port, read the log
 tail, and report the URL — unassisted.*
 
 **M4 — Coordination: todos, scratchpads, locks (+ UI panels).**
-Full todo graph (blockers/tags/comments/locks/transfer), revision-guarded scratchpads, lease
+Full todo graph (blockers/tags/comments/locks), revision-guarded scratchpads, lease
 locks. UI: todo board with blocker edges visible, rendered-markdown scratchpad viewer that
 live-updates as agents write. *Done when: two agents split a task list via todo locks and
-build a plan in a scratchpad I watch in the app.*
+build a plan in a scratchpad the human watches in the app.*
 
 **M5 — Agents + timers (the orchestration payoff).**
-Agent tool registry (claude/codex/gemini/opencode configs), spawn_agent + agent_instructions
-preamble, send_input prompting, attention-state detection, timers incl. fire_when_idle_any/all
+Agent tool registry (claude/codex/gemini/opencode configs), resolved spawn settings,
+send_input prompting, attention-state detection, timers with required any/all idle mode
 with PTY-injection delivery, self-close confirmation guard. *Done when: an orchestrator agent
 spawns two workers, assigns todos, goes to sleep on an idle timer, wakes when they finish, and
 integrates their results.*

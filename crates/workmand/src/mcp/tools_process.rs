@@ -1,6 +1,6 @@
 //! MCP process lifecycle and terminal-output tools.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use axum::http::request::Parts;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -11,11 +11,12 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use workman_core::{Actor, Process, ProcessId, ProjectId};
+use workman_core::{Actor, Process, ProcessId, ProcessStatus, ProjectId};
 
 use super::{WorkmanMcp, failure, scoped_project, success};
 use crate::{
-    ProcessRegistry, RegistryError, completion_ledger::CompletionLedger, timers::now_millis,
+    ProcessRegistry, ReadinessService, RegistryError, completion_ledger::CompletionLedger,
+    timers::now_millis,
 };
 
 const DEFAULT_OUTPUT_LINES: usize = 50;
@@ -44,19 +45,9 @@ struct ProcessTargetArgs {
     /// Optional project scope override.
     #[serde(default)]
     project_id: Option<ProjectId>,
-}
-
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-struct StopProcessArgs {
-    /// Process ID. Omit with process_name to target this MCP session's own process.
+    /// Include listeners, ports, localhost URLs, and readiness.
     #[serde(default)]
-    process_id: Option<ProcessId>,
-    /// Exact process name; numeric values and names ending in `--<id>` also resolve by ID.
-    #[serde(default)]
-    process_name: Option<String>,
-    /// Optional project scope override.
-    #[serde(default)]
-    project_id: Option<ProjectId>,
+    include_ports: bool,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -73,7 +64,7 @@ struct CloseProcessArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct RenameProcessArgs {
+struct UpdateProcessArgs {
     #[serde(default)]
     process_id: Option<ProcessId>,
     #[serde(default)]
@@ -81,11 +72,15 @@ struct RenameProcessArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
     /// New process name.
-    new_name: String,
+    #[serde(default)]
+    new_name: Option<String>,
+    /// Toggle durable notifications to the authenticated direct spawner.
+    #[serde(default)]
+    notify_spawner_on_idle: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-struct RenderedOutputArgs {
+struct ProcessOutputArgs {
     #[serde(default)]
     process_id: Option<ProcessId>,
     #[serde(default)]
@@ -101,23 +96,13 @@ struct RenderedOutputArgs {
     /// Optional zero-based, exclusive final retained row.
     #[serde(default)]
     end_row: Option<usize>,
-}
-
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-struct RawOutputArgs {
+    /// Return retained raw PTY bytes instead of rendered rows.
     #[serde(default)]
-    process_id: Option<ProcessId>,
-    #[serde(default)]
-    process_name: Option<String>,
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    /// Maximum text lines to retain in the readable tail. Defaults to 50, max 200.
-    #[serde(default)]
-    lines: Option<usize>,
-    /// Optional absolute raw stream byte offset.
+    raw: bool,
+    /// Optional absolute raw stream byte offset when raw=true.
     #[serde(default)]
     offset: Option<u64>,
-    /// Maximum raw bytes to read. Defaults to and is capped at 256 KiB.
+    /// Maximum raw bytes when raw=true. Defaults to and is capped at 256 KiB.
     #[serde(default)]
     max_bytes: Option<usize>,
 }
@@ -135,6 +120,9 @@ struct SearchOutputArgs {
     /// Maximum matches. Defaults to 20 and is capped at 100.
     #[serde(default)]
     max_results: Option<usize>,
+    /// Search retained raw PTY output instead of rendered rows.
+    #[serde(default)]
+    raw: bool,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -162,26 +150,43 @@ struct SendInputArgs {
     wait_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum LifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct SetNotifySpawnerOnIdleArgs {
-    /// Child process ID. Omit with process_name.
+struct ProcessControlArgs {
     #[serde(default)]
     process_id: Option<ProcessId>,
-    /// Exact child process name. Omit with process_id.
     #[serde(default)]
     process_name: Option<String>,
-    /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Prospectively deliver coalesced idle/attention turns to this child's direct agent spawner.
-    enabled: bool,
+    action: LifecycleAction,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum BulkAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CommandsControlArgs {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    action: BulkAction,
 }
 
 #[tool_router(router = process_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
-    #[tool(
-        description = "List processes in the effective project scope. Returns { processes: [...] }"
-    )]
+    #[tool(description = "List process statuses and aggregate counts in this project")]
     async fn list_processes(
         &self,
         Extension(parts): Extension<Parts>,
@@ -193,7 +198,21 @@ impl WorkmanMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         match registry.list_statuses(Some(project.id)) {
-            Ok(processes) => success(json!({ "processes": processes })),
+            Ok(processes) => {
+                let mut by_status = BTreeMap::<String, usize>::new();
+                for process in &processes {
+                    *by_status
+                        .entry(process.process.status.as_str().into())
+                        .or_default() += 1;
+                }
+                success(json!({
+                    "project_id": project.id,
+                    "process_count": processes.len(),
+                    "running_count": processes.iter().filter(|process| process.process.status == ProcessStatus::Running).count(),
+                    "by_status": by_status,
+                    "processes": processes,
+                }))
+            }
             Err(error) => registry_failure(error),
         }
     }
@@ -204,77 +223,60 @@ impl WorkmanMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<ProcessTargetArgs>,
     ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (process, _) = match resolve_process(&mut registry, &parts, target(&args)) {
-            Ok(resolved) => resolved,
-            Err(error) => return target_failure(error),
+        let process_id = {
+            let mut registry = self.registry.lock().await;
+            let (process, _) = match resolve_process(&mut registry, &parts, target(&args)) {
+                Ok(resolved) => resolved,
+                Err(error) => return target_failure(error),
+            };
+            if !args.include_ports {
+                return match registry.get_status(process.id) {
+                    Ok(status) => success(status),
+                    Err(error) => registry_failure(error),
+                };
+            }
+            process.id
         };
-        match registry.get_status(process.id) {
-            Ok(status) => success(status),
-            Err(error) => registry_failure(error),
+        let status = {
+            let mut registry = self.registry.lock().await;
+            match registry.get_status(process_id) {
+                Ok(status) => status,
+                Err(error) => return registry_failure(error),
+            }
+        };
+        match ReadinessService::default()
+            .get_process_ports(&self.registry, process_id)
+            .await
+        {
+            Ok(ports) => {
+                let mut result = serde_json::to_value(status).expect("process status serializes");
+                result
+                    .as_object_mut()
+                    .expect("process status is an object")
+                    .insert("ports".into(), json!(ports));
+                success(result)
+            }
+            Err(error) => failure(error.code(), error.to_string()),
         }
     }
 
-    #[tool(
-        description = "Prospectively enable or disable durable, coalesced child completion, needs-input, exit, and crash turns to the authenticated direct spawner, which must be an agent. The opt-in survives child exit/crash and restart. Finished is capped once per child input, excludes a child parked Waiting on its own active timer, and yields to an active unpaused idle timer owned by the spawner for the same watched child; other reasons still notify. Positive human drafts hold indefinitely, while unknown composers hold for 120 seconds after human input. Only the process that spawned this child may change the setting; project jail rules still apply."
-    )]
-    async fn set_notify_spawner_on_idle(
+    #[tool(description = "Start, stop, or restart one process")]
+    async fn process_control(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<SetNotifySpawnerOnIdleArgs>,
+        Parameters(args): Parameters<ProcessControlArgs>,
     ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let target = ProcessTarget {
-            process_id: args.process_id,
-            process_name: args.process_name.as_deref(),
-            project_id: args.project_id,
-        };
-        let (child, actor) = match resolve_process(&mut registry, &parts, target) {
-            Ok(resolved) => resolved,
-            Err(error) => return target_failure(error),
-        };
-        let Some(spawner_process_id) = actor.process_id else {
-            return failure(
-                "process_identity_required",
-                "set_notify_spawner_on_idle requires an authenticated process identity",
-            );
-        };
-        match registry.set_notify_spawner_on_idle(spawner_process_id, child.id, args.enabled) {
-            Ok(status) => success(status),
-            Err(error) => registry_failure(error),
-        }
-    }
-
-    #[tool(description = "Start an existing command, terminal, or agent")]
-    async fn start_process(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProcessTargetArgs>,
-    ) -> CallToolResult {
-        lifecycle(self, &parts, target(&args), LifecycleAction::Start).await
-    }
-
-    #[tool(description = "Gracefully stop a process and all descendants recursively")]
-    async fn stop_process(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<StopProcessArgs>,
-    ) -> CallToolResult {
-        let target = ProcessTarget {
-            process_id: args.process_id,
-            process_name: args.process_name.as_deref(),
-            project_id: args.project_id,
-        };
-        lifecycle(self, &parts, target, LifecycleAction::Stop).await
-    }
-
-    #[tool(description = "Restart an existing command, terminal, or agent")]
-    async fn restart_process(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProcessTargetArgs>,
-    ) -> CallToolResult {
-        lifecycle(self, &parts, target(&args), LifecycleAction::Restart).await
+        lifecycle(
+            self,
+            &parts,
+            ProcessTarget {
+                process_id: args.process_id,
+                process_name: args.process_name.as_deref(),
+                project_id: args.project_id,
+            },
+            args.action,
+        )
+        .await
     }
 
     #[tool(
@@ -334,65 +336,66 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Rename one process")]
-    async fn rename_process(
+    #[tool(description = "Rename a process or toggle notifications to its direct spawner")]
+    async fn update_process(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<RenameProcessArgs>,
+        Parameters(args): Parameters<UpdateProcessArgs>,
     ) -> CallToolResult {
+        if args.new_name.is_none() && args.notify_spawner_on_idle.is_none() {
+            return failure(
+                "invalid_params",
+                "set new_name, notify_spawner_on_idle, or both",
+            );
+        }
         let mut registry = self.registry.lock().await;
         let target = ProcessTarget {
             process_id: args.process_id,
             process_name: args.process_name.as_deref(),
             project_id: args.project_id,
         };
-        let (process, _) = match resolve_process(&mut registry, &parts, target) {
+        let (process, actor) = match resolve_process(&mut registry, &parts, target) {
             Ok(resolved) => resolved,
             Err(error) => return target_failure(error),
         };
-        let result = registry
-            .rename(process.id, args.new_name)
-            .and_then(|process| registry.get_status(process.id));
-        match result {
+        if let Some(new_name) = args.new_name
+            && let Err(error) = registry.rename(process.id, new_name)
+        {
+            return registry_failure(error);
+        }
+        if let Some(enabled) = args.notify_spawner_on_idle {
+            let Some(spawner_process_id) = actor.process_id else {
+                return failure(
+                    "process_identity_required",
+                    "notify_spawner_on_idle requires an authenticated process identity",
+                );
+            };
+            if let Err(error) =
+                registry.set_notify_spawner_on_idle(spawner_process_id, process.id, enabled)
+            {
+                return registry_failure(error);
+            }
+        }
+        match registry.get_status(process.id) {
             Ok(status) => success(status),
             Err(error) => registry_failure(error),
         }
     }
 
-    #[tool(description = "Start all command processes in the effective project")]
-    async fn start_all_commands(
+    #[tool(description = "Start, stop, or restart all command processes in this project")]
+    async fn commands_control(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
+        Parameters(args): Parameters<CommandsControlArgs>,
     ) -> CallToolResult {
-        bulk_commands(self, &parts, args.project_id, BulkAction::Start).await
+        bulk_commands(self, &parts, args.project_id, args.action).await
     }
 
-    #[tool(description = "Stop all running command processes in the effective project")]
-    async fn stop_all_commands(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
-    ) -> CallToolResult {
-        bulk_commands(self, &parts, args.project_id, BulkAction::Stop).await
-    }
-
-    #[tool(description = "Restart all command processes in the effective project")]
-    async fn restart_all_commands(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
-    ) -> CallToolResult {
-        bulk_commands(self, &parts, args.project_id, BulkAction::Restart).await
-    }
-
-    #[tool(
-        description = "Return a ranged, escape-free terminal rendering; defaults to the last 50 rows"
-    )]
+    #[tool(description = "Read rendered terminal rows, or retained PTY bytes with raw=true")]
     async fn get_process_output(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<RenderedOutputArgs>,
+        Parameters(args): Parameters<ProcessOutputArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
         let target = ProcessTarget {
@@ -404,6 +407,41 @@ impl WorkmanMcp {
             Ok(resolved) => resolved,
             Err(error) => return target_failure(error),
         };
+        if args.raw {
+            let max_bytes = args
+                .max_bytes
+                .unwrap_or(DEFAULT_RAW_BYTES)
+                .clamp(1, MAX_RAW_BYTES);
+            let offset = match args.offset {
+                Some(offset) => offset,
+                None => match registry.raw_output(process.id, None, 0) {
+                    Ok(metadata) => metadata.total_bytes.saturating_sub(max_bytes as u64),
+                    Err(error) => return registry_failure(error),
+                },
+            };
+            return match registry.raw_output(process.id, Some(offset), max_bytes) {
+                Ok(output) => {
+                    let text = String::from_utf8_lossy(&output.data);
+                    let lines = args
+                        .lines
+                        .unwrap_or(DEFAULT_OUTPUT_LINES)
+                        .clamp(1, MAX_OUTPUT_LINES);
+                    success(json!({
+                        "process_id": process.id,
+                        "process_name": process.name,
+                        "raw": true,
+                        "output": tail_lines(&text, lines),
+                        "data_base64": BASE64.encode(&output.data),
+                        "start_offset": output.start_offset,
+                        "end_offset": output.end_offset,
+                        "total_bytes": output.total_bytes,
+                        "truncated": output.truncated,
+                        "status": output.status,
+                    }))
+                }
+                Err(error) => registry_failure(error),
+            };
+        }
         let lines = args
             .lines
             .unwrap_or(DEFAULT_OUTPUT_LINES)
@@ -442,74 +480,14 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(
-        description = "Return retained raw PTY output, including cleared and alternate-screen bytes"
-    )]
-    async fn get_process_raw_output(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<RawOutputArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let target = ProcessTarget {
-            process_id: args.process_id,
-            process_name: args.process_name.as_deref(),
-            project_id: args.project_id,
-        };
-        let (process, _) = match resolve_process(&mut registry, &parts, target) {
-            Ok(resolved) => resolved,
-            Err(error) => return target_failure(error),
-        };
-        let max_bytes = args
-            .max_bytes
-            .unwrap_or(DEFAULT_RAW_BYTES)
-            .clamp(1, MAX_RAW_BYTES);
-        let offset = match args.offset {
-            Some(offset) => offset,
-            None => match registry.raw_output(process.id, None, 0) {
-                Ok(metadata) => metadata.total_bytes.saturating_sub(max_bytes as u64),
-                Err(error) => return registry_failure(error),
-            },
-        };
-        match registry.raw_output(process.id, Some(offset), max_bytes) {
-            Ok(output) => {
-                let text = String::from_utf8_lossy(&output.data);
-                let lines = args
-                    .lines
-                    .unwrap_or(DEFAULT_OUTPUT_LINES)
-                    .clamp(1, MAX_OUTPUT_LINES);
-                success(json!({
-                    "process_id": process.id,
-                    "process_name": process.name,
-                    "output": tail_lines(&text, lines),
-                    "data_base64": BASE64.encode(&output.data),
-                    "start_offset": output.start_offset,
-                    "end_offset": output.end_offset,
-                    "total_bytes": output.total_bytes,
-                    "truncated": output.truncated,
-                    "status": output.status,
-                }))
-            }
-            Err(error) => registry_failure(error),
-        }
-    }
-
-    #[tool(description = "Search rendered terminal rows with a case-insensitive substring")]
+    #[tool(description = "Search rendered terminal rows, or retained PTY bytes with raw=true")]
     async fn search_output(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<SearchOutputArgs>,
     ) -> CallToolResult {
-        search(self, &parts, args, false).await
-    }
-
-    #[tool(description = "Search the retained raw PTY stream with a case-insensitive substring")]
-    async fn search_raw_output(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<SearchOutputArgs>,
-    ) -> CallToolResult {
-        search(self, &parts, args, true).await
+        let raw = args.raw;
+        search(self, &parts, args, raw).await
     }
 
     #[tool(description = "Clear retained raw and rendered output without stopping the process")]
@@ -533,9 +511,7 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(
-        description = "Send text or raw bytes to a running process; guarded dialogs require force=true for text, while raw bytes bypass the guard; OpenCode question options require raw bytes for number, arrow, or Enter keys; wait_ms returns a fresh tail"
-    )]
+    #[tool(description = "Send text or raw bytes to a process; wait_ms returns fresh output")]
     async fn send_input(
         &self,
         Extension(parts): Extension<Parts>,
@@ -762,13 +738,6 @@ fn registry_failure(error: RegistryError) -> CallToolResult {
     failure(error.code(), error.to_string())
 }
 
-#[derive(Clone, Copy)]
-enum LifecycleAction {
-    Start,
-    Stop,
-    Restart,
-}
-
 async fn lifecycle(
     service: &WorkmanMcp,
     parts: &Parts,
@@ -808,13 +777,6 @@ async fn lifecycle(
         Ok(status) => success(status),
         Err(error) => registry_failure(error),
     }
-}
-
-#[derive(Clone, Copy)]
-enum BulkAction {
-    Start,
-    Stop,
-    Restart,
 }
 
 async fn bulk_commands(

@@ -316,12 +316,10 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             .description
             .as_deref()
             .is_some_and(|description| {
-                description.contains("Template: set agent_template_id only")
-                    && description.contains("supplies its agent tool, model, effort")
-                    && description.contains("Pass model or agent_tool_id only to override")
-                    && description.contains(
-                        "keeps the template's model only for the same agent type, carries effort between Claude and Codex"
-                    )
+                description.contains("model only within the same agent type")
+                    && description.contains("never carry command defaults")
+                    && description.contains("only caller model")
+                    && description.contains("resolved reports")
                     && !description.contains("preferred")
             })
     );
@@ -330,13 +328,13 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             .as_str()
             .is_some_and(|description| {
                 description.contains("Required unless agent_template_id is set")
-                    && description.contains("overrides the template's agent")
+                    && description.contains("model only within the same agent type")
             })
     );
     assert!(
         spawn_tool.input_schema["properties"]["agent_template_id"]["description"]
             .as_str()
-            .is_some_and(|description| description.contains("only when the user names one"))
+            .is_some_and(|description| description.contains("list_agent_tools.agent_templates"))
     );
     assert!(
         spawn_tool.input_schema["properties"]["model"]["description"]
@@ -352,24 +350,10 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         spawn_tool
             .description
             .as_deref()
-            .is_some_and(|description| description.contains("no idle timer is needed"))
+            .is_some_and(|description| {
+                description.contains("avoids an idle timer unless a deadline matters")
+            })
     );
-    for guidance in [
-        "prospective",
-        "delivery waits behind human drafts",
-        "explicit pending idle timer wins",
-        "unless a deadline matters",
-        "spawner's submitted input",
-        "parked Waiting",
-    ] {
-        assert!(
-            spawn_tool
-                .description
-                .as_deref()
-                .is_some_and(|description| description.contains(guidance)),
-            "spawn_agent description omitted {guidance:?}"
-        );
-    }
     assert!(
         spawn_tool.input_schema["properties"]["notify_spawner_on_idle"]["description"]
             .as_str()
@@ -378,17 +362,15 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
                     && description.contains("defaults to false")
             })
     );
-    let toggle_tool = advertised_tools
+    let update_tool = advertised_tools
         .iter()
-        .find(|tool| tool.name == "set_notify_spawner_on_idle")
-        .expect("set_notify_spawner_on_idle tool is present");
+        .find(|tool| tool.name == "update_process")
+        .expect("update_process tool is present");
     assert!(
-        toggle_tool
+        update_tool
             .description
             .as_deref()
-            .is_some_and(|description| {
-                description.contains("direct spawner") && description.contains("parked Waiting")
-            })
+            .is_some_and(|description| description.contains("notifications"))
     );
 
     let tools = call(&parent, "list_agent_tools", json!({})).await;
@@ -401,7 +383,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     assert!(tools["agent_tools"].as_array().unwrap().iter().any(|tool| {
         tool["id"] == 99 && tool["command"] == fake_agent.to_string_lossy().as_ref()
     }));
-    let templates = call(&parent, "list_agent_templates", json!({})).await;
+    let templates = &tools;
     assert_eq!(templates["agent_templates"].as_array().unwrap().len(), 4);
     assert_eq!(templates["agent_templates"][0]["id"], 300);
     assert_eq!(
@@ -845,12 +827,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         true
     );
 
-    let terminal = call(
-        &parent,
-        "spawn_process",
-        json!({ "project_id": 7, "kind": "terminal" }),
-    )
-    .await;
+    let terminal = call(&parent, "spawn_terminal", json!({ "project_id": 7 })).await;
     let terminal_id = terminal["process_id"].as_i64().unwrap();
     assert_eq!(terminal["kind"], "terminal");
     assert!(terminal["name"].as_str().unwrap().starts_with("terminal--"));
