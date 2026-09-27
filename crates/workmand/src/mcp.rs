@@ -389,8 +389,8 @@ impl ServerHandler for WorkmanMcp {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if self.request_has_process_identity(&context).await
-            && !process_tool_allowed(request.name.as_ref())
+        if !process_tool_allowed(request.name.as_ref())
+            && self.request_has_process_identity(&context).await
         {
             return Ok(failure(
                 "user_session_required",

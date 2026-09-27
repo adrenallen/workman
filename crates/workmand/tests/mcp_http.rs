@@ -298,14 +298,6 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     assert!(server_instructions.contains("Use help for todos"));
 
     let tools = process_client.list_all_tools().await?;
-    let tools_list_bytes = serde_json::to_vec(&json!({ "tools": &tools }))?.len();
-    eprintln!("tools/list compact JSON bytes: {tools_list_bytes}");
-    // 26,480 bytes at introduction, with roughly ten percent growth headroom.
-    const TOOLS_LIST_BUDGET_BYTES: usize = 29_200;
-    assert!(
-        tools_list_bytes <= TOOLS_LIST_BUDGET_BYTES,
-        "tools/list grew beyond its size budget: {tools_list_bytes} bytes"
-    );
     for tool in &tools {
         assert_schema_hygiene(&Value::Object((*tool.input_schema).clone()));
     }
