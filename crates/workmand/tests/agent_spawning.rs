@@ -184,6 +184,16 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             resume_args: None,
             continue_args: None,
         })?;
+        registry.store().put_agent_tool(&AgentTool {
+            id: 106,
+            name: "Shell-composed Claude".into(),
+            command: "export WORKMAN_TEMPLATE_PROBE=1 && true".into(),
+            tool_type: "claude_code".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        })?;
         registry.store().put_agent_template(&AgentTemplate {
             id: 300,
             profile_id: 1,
@@ -221,6 +231,17 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             ],
             prompt: "Review the change.".into(),
             sort_order: 2,
+            created_at: 0,
+            updated_at: 0,
+        })?;
+        registry.store().put_agent_template(&AgentTemplate {
+            id: 303,
+            profile_id: 1,
+            name: "Shell-composed reviewer".into(),
+            agent_tool_id: 106,
+            extra_args: vec!["--model".into(), "fable".into()],
+            prompt: String::new(),
+            sort_order: 3,
             created_at: 0,
             updated_at: 0,
         })?;
@@ -298,6 +319,9 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
                 description.contains("Template: set agent_template_id only")
                     && description.contains("supplies its agent tool, model, effort")
                     && description.contains("Pass model or agent_tool_id only to override")
+                    && description.contains(
+                        "keeps the template's model only for the same agent type, carries effort between Claude and Codex"
+                    )
                     && !description.contains("preferred")
             })
     );
@@ -378,7 +402,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         tool["id"] == 99 && tool["command"] == fake_agent.to_string_lossy().as_ref()
     }));
     let templates = call(&parent, "list_agent_templates", json!({})).await;
-    assert_eq!(templates["agent_templates"].as_array().unwrap().len(), 3);
+    assert_eq!(templates["agent_templates"].as_array().unwrap().len(), 4);
     assert_eq!(templates["agent_templates"][0]["id"], 300);
     assert_eq!(
         templates["agent_templates"][0]["launch"],
@@ -661,6 +685,43 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         &parent,
         "close_process",
         json!({ "project_id": 7, "process_id": unsupported_process_id }),
+    )
+    .await;
+
+    let shell_composed_spawn = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 7,
+            "agent_template_id": 303,
+            "name": "shell-composed-template-model"
+        }),
+    )
+    .await;
+    assert_eq!(
+        shell_composed_spawn["resolved"],
+        json!({
+            "agent_tool_id": 106,
+            "agent_tool_name": "Shell-composed Claude",
+            "model": "fable",
+            "effort": "agent default",
+            "template_args_skipped": []
+        })
+    );
+    let shell_composed_process_id = shell_composed_spawn["process_id"].as_i64().unwrap();
+    let shell_composed_command = registry
+        .lock()
+        .await
+        .get_status(shell_composed_process_id)?
+        .process
+        .command
+        .unwrap();
+    assert!(shell_composed_command.contains("export WORKMAN_TEMPLATE_PROBE=1 && true"));
+    assert!(shell_composed_command.contains("--model fable"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 7, "process_id": shell_composed_process_id }),
     )
     .await;
 
