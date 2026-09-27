@@ -1720,6 +1720,18 @@ mod tests {
             .unwrap();
         store
             .put_agent_tool(&AgentTool {
+                id: 92,
+                name: "Scripted Timer OpenCode".into(),
+                command: "scripted-timer-opencode".into(),
+                tool_type: "opencode".into(),
+                enabled: true,
+                source: workman_core::AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
+            })
+            .unwrap();
+        store
+            .put_agent_tool(&AgentTool {
                 id: 91,
                 name: "Scripted Timer Kimi".into(),
                 command: "scripted-timer-kimi".into(),
@@ -2889,6 +2901,84 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn opencode_idle_repaints_create_one_completion_and_rearm_waits() {
+        const OPENCODE_ID: ProcessId = 21;
+
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                OPENCODE_ID,
+                "opencode-idle-repaint",
+                r#"rest='┃ Build auto · fixture
+╹▀▀▀▀▀▀▀▀'; printf '%s\n' "$rest"; IFS= read -r line; printf '\033[2J\033[H┃ Build auto · fixture\n╹▀▀▀▀▀▀▀▀\nesc interrupt\n'; sleep 0.7; printf '\033[2J\033[Hanswer:ok\n%s\n' "$rest"; sleep 6; while :; do sleep 0.3; printf '\033[2J\033[Hanswer:ok\n%s\n' "$rest"; done"#,
+                Some(92),
+            ))
+            .unwrap();
+        registry.start(OPENCODE_ID).unwrap();
+        put_actor(&registry, "opencode-owner", DELIVERY_ID);
+        wait_for_state(&mut registry, OPENCODE_ID, AttentionState::Idle);
+
+        registry.submit_input(OPENCODE_ID, b"go").unwrap();
+        CompletionLedger::new(registry.store())
+            .record_input(DELIVERY_ID, OPENCODE_ID, now_millis())
+            .unwrap();
+        wait_for_state(&mut registry, OPENCODE_ID, AttentionState::Working);
+        wait_for_state(&mut registry, OPENCODE_ID, AttentionState::Idle);
+
+        let completion_count = |registry: &ProcessRegistry| -> i64 {
+            registry
+                .store()
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM process_completions WHERE process_id = ?1",
+                    [OPENCODE_ID],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(completion_count(&registry), 1);
+        assert!(matches!(
+            TimerService::new(&mut registry)
+                .set_idle(
+                    "opencode-owner".into(),
+                    DELIVERY_ID,
+                    "opencode finished".into(),
+                    TimerKind::IdleAny,
+                    vec![OPENCODE_ID],
+                    20_000,
+                    now_millis(),
+                )
+                .unwrap(),
+            IdleTimerOutcome::AlreadySatisfied { .. }
+        ));
+
+        let poll_until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < poll_until {
+            assert_eq!(
+                registry.get_status(OPENCODE_ID).unwrap().agent_state.state,
+                AttentionState::Idle
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(completion_count(&registry), 1);
+        assert!(matches!(
+            TimerService::new(&mut registry)
+                .set_idle(
+                    "opencode-owner".into(),
+                    DELIVERY_ID,
+                    "wait for another turn".into(),
+                    TimerKind::IdleAny,
+                    vec![OPENCODE_ID],
+                    20_000,
+                    now_millis(),
+                )
+                .unwrap(),
+            IdleTimerOutcome::Created(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn generic_promptless_status_repaints_record_one_completion_per_input() {
         const PROMPTLESS_ID: ProcessId = 20;
 
@@ -2980,16 +3070,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn later_work_supersedes_a_mid_turn_idle_completion() {
+    fn opencode_later_work_supersedes_a_mid_turn_idle_completion() {
         const BURSTY_ID: ProcessId = 17;
 
         let mut registry = test_registry(false);
         registry
             .create(process(
                 BURSTY_ID,
-                "mid-turn-composer",
-                r#"printf '❯\n'; while IFS= read -r line; do printf 'thinking...\nesc to interrupt\n'; sleep 0.2; printf 'partial\n❯\n'; sleep 7; printf 'thinking...\nesc to interrupt\n'; sleep 0.2; printf 'final\n❯\n'; done"#,
-                Some(90),
+                "opencode-mid-turn-composer",
+                r#"rest='┃ Build auto · fixture
+╹▀▀▀▀▀▀▀▀'; printf '%s\n' "$rest"; while IFS= read -r line; do printf '\033[2J\033[H%s\nesc interrupt\n' "$rest"; sleep 0.2; printf '\033[2J\033[Hpartial\n%s\n' "$rest"; sleep 7; printf '\033[2J\033[H%s\nesc interrupt\n' "$rest"; sleep 0.2; printf '\033[2J\033[Hfinal\n%s\n' "$rest"; done"#,
+                Some(92),
             ))
             .unwrap();
         registry.start(BURSTY_ID).unwrap();
