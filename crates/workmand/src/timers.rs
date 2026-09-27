@@ -4,7 +4,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
-    time::Duration,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,33 @@ use crate::{
 };
 
 const TIMER_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const TIMER_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+fn log_timer_error_rate_limited(
+    timer_id: TimerId,
+    error: &TimerError,
+    quarantine_error: Option<&TimerError>,
+) {
+    static LAST_LOGGED: OnceLock<Mutex<BTreeMap<TimerId, Instant>>> = OnceLock::new();
+
+    let now = Instant::now();
+    let mut last_logged = LAST_LOGGED
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    last_logged.retain(|_, logged_at| now.duration_since(*logged_at) < TIMER_ERROR_LOG_INTERVAL);
+    if last_logged.contains_key(&timer_id) {
+        return;
+    }
+    last_logged.insert(timer_id, now);
+    if let Some(quarantine_error) = quarantine_error {
+        eprintln!(
+            "timer {timer_id} tick failed: {error}; quarantine persistence also failed: {quarantine_error}"
+        );
+    } else {
+        eprintln!("timer {timer_id} tick failed and was quarantined: {error}");
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum TimerError {
@@ -198,6 +226,7 @@ pub(crate) enum TimerSatisfactionReason {
     UnseenCompletion,
     FreshTransition,
     Deadline,
+    Error,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -719,12 +748,39 @@ impl<'a> TimerService<'a> {
                 Ok(None) => {}
                 Err(error) => {
                     // A corrupt/deleted target or one timer's persistence failure must not
-                    // prevent unrelated timers later in the due-order from being evaluated.
-                    eprintln!("timer {timer_id} tick failed: {error}");
+                    // spin forever or prevent later timers from being evaluated. Persisting
+                    // fired first removes the owner from waiting state; the fallback runtime
+                    // makes timer_list readable even when its prior JSON was corrupt.
+                    let quarantine_error = self.quarantine_timer(timer_id, now_ms).err();
+                    log_timer_error_rate_limited(timer_id, &error, quarantine_error.as_ref());
                 }
             }
         }
         Ok(fired)
+    }
+
+    fn quarantine_timer(&self, timer_id: TimerId, now_ms: i64) -> TimerResult<()> {
+        let Some(mut timer) = self.registry.store().get_timer(timer_id)? else {
+            return Ok(());
+        };
+        if timer.fired {
+            return Ok(());
+        }
+        timer.fired = true;
+        timer.fired_at = Some(now_ms);
+        self.registry.store().put_timer(&timer)?;
+
+        let mut diagnostics = TimerDiagnostics::default();
+        diagnostics.record_error();
+        self.put_runtime(
+            timer.id,
+            &TimerRuntime {
+                due_at: timer.max_wait_deadline.unwrap_or(timer.created_at),
+                paused_at: None,
+                watch_state: BTreeMap::new(),
+                diagnostics,
+            },
+        )
     }
 
     fn tick_one(&mut self, timer_id: TimerId, now_ms: i64) -> TimerResult<Option<TimerFire>> {
@@ -776,7 +832,8 @@ impl<'a> TimerService<'a> {
                                 | TimerSatisfactionReason::FreshTransition => {
                                     Some(satisfaction.reason)
                                 }
-                                TimerSatisfactionReason::Deadline => None,
+                                TimerSatisfactionReason::Deadline
+                                | TimerSatisfactionReason::Error => None,
                             })
                             .unwrap_or(TimerSatisfactionReason::FreshTransition),
                     );
@@ -1294,6 +1351,16 @@ impl TimerDiagnostics {
                 reason: TimerSatisfactionReason::Deadline,
             });
         }
+    }
+
+    fn record_error(&mut self) {
+        self.fire_reason = Some(TimerSatisfactionReason::Error);
+        self.satisfied_by.clear();
+        self.satisfied_by.push(TimerSatisfaction {
+            process_id: None,
+            completed_at_ms: None,
+            reason: TimerSatisfactionReason::Error,
+        });
     }
 }
 
@@ -2547,6 +2614,86 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn generic_idle_repaints_do_not_mint_new_completions_or_refire() {
+        const REPAINT_ID: ProcessId = 19;
+
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                REPAINT_ID,
+                "kimi-idle-repaint",
+                r#"printf '❯\n'; IFS= read -r line; sleep 2.5; printf 'answer:%s\n❯ ' "$line"; while :; do sleep 0.3; printf '\r❯ '; done"#,
+                Some(91),
+            ))
+            .unwrap();
+        registry.start(REPAINT_ID).unwrap();
+        put_actor(&registry, "repaint-owner", DELIVERY_ID);
+        wait_for_state(&mut registry, REPAINT_ID, AttentionState::Idle);
+
+        registry.submit_input(REPAINT_ID, b"go").unwrap();
+        CompletionLedger::new(registry.store())
+            .record_input(DELIVERY_ID, REPAINT_ID, now_millis())
+            .unwrap();
+        wait_for_output(&mut registry, REPAINT_ID, "answer:go");
+        wait_for_state(&mut registry, REPAINT_ID, AttentionState::Idle);
+        assert!(matches!(
+            TimerService::new(&mut registry)
+                .set_idle(
+                    "repaint-owner".into(),
+                    DELIVERY_ID,
+                    "first repaint wake".into(),
+                    TimerKind::IdleAny,
+                    vec![REPAINT_ID],
+                    20_000,
+                    now_millis(),
+                )
+                .unwrap(),
+            IdleTimerOutcome::AlreadySatisfied { .. }
+        ));
+        let completion_count = |registry: &ProcessRegistry| -> i64 {
+            registry
+                .store()
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM process_completions WHERE process_id = ?1",
+                    [REPAINT_ID],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(completion_count(&registry), 1);
+
+        let poll_until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < poll_until {
+            assert_eq!(
+                registry.get_status(REPAINT_ID).unwrap().agent_state.state,
+                AttentionState::Idle
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(
+            completion_count(&registry),
+            1,
+            "cosmetic idle repaints must not advance work evidence"
+        );
+        assert!(matches!(
+            TimerService::new(&mut registry)
+                .set_idle(
+                    "repaint-owner".into(),
+                    DELIVERY_ID,
+                    "must wait for real work".into(),
+                    TimerKind::IdleAny,
+                    vec![REPAINT_ID],
+                    20_000,
+                    now_millis(),
+                )
+                .unwrap(),
+            IdleTimerOutcome::Created(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn later_work_supersedes_a_mid_turn_idle_completion() {
         const BURSTY_ID: ProcessId = 17;
 
@@ -2734,10 +2881,39 @@ mod tests {
         let fires = TimerService::new(&mut registry).tick(1_000).unwrap();
         assert_eq!(fires.len(), 1);
         assert_eq!(fires[0].timer_id, good_id);
+        let bad_timer = registry.store().get_timer(bad_id).unwrap().unwrap();
+        assert!(bad_timer.fired, "the broken timer must be quarantined");
+        assert_eq!(bad_timer.fired_at, Some(1_000));
+        let bad_view = TimerService::new(&mut registry)
+            .list(PROJECT_ID, 10, 1_000)
+            .unwrap()
+            .into_iter()
+            .find(|view| view.timer.id == bad_id)
+            .unwrap();
+        assert_eq!(bad_view.fire_reason, Some(TimerSatisfactionReason::Error));
+        assert_eq!(
+            bad_view.satisfied_by[0].reason,
+            TimerSatisfactionReason::Error
+        );
+        for tick in 1_001..1_041 {
+            assert!(
+                TimerService::new(&mut registry)
+                    .tick(tick)
+                    .unwrap()
+                    .is_empty(),
+                "a quarantined timer must not retry or log on later ticks"
+            );
+        }
         wait_for_output(
             &mut registry,
             DELIVERY_ID,
             "received:[later timer delivered]",
+        );
+        let output = registry.rendered_output(DELIVERY_ID).unwrap().text;
+        assert!(!output.contains("must not deliver"));
+        assert_eq!(
+            output.matches("received:[later timer delivered]").count(),
+            1
         );
     }
 

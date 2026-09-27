@@ -142,7 +142,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Create a no-poll wake-up when any watched process has an unreported completion with work evidence since your last submitted input to it, later makes a fresh non-idle-to-idle transition, or reaches the hard deadline. A process you never prompted still requires a fresh transition. Queued prompts defer completion recording. The result reports already_idle and satisfied_by diagnostics; timer_list retains them for non-immediate timers. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
+        description = "Create a no-poll wake-up when any watched process has an unreported completion with work evidence since your last submitted input to it, later makes a fresh non-idle-to-idle transition, or reaches the hard deadline. Work evidence is adapter-recognized busy state or, for generic adapters, non-cosmetic output past the recent-input grace. A process you never prompted still requires a fresh transition. Queued prompts defer completion recording. The result reports already_idle and satisfied_by diagnostics; timer_list retains them for non-immediate timers. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
     )]
     async fn timer_fire_when_idle_any(
         &self,

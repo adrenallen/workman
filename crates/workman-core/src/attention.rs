@@ -338,7 +338,7 @@ impl AttentionEngine {
                 && !explicit_attention
                 && !content_changed);
         if let Some(input_at) = self.last_input_at
-            && !ui_attention_neutral
+            && !attention_neutral
             && (flags.busy
                 || (!detects_busy
                     && now_ms >= input_at.saturating_add(duration_millis(RECENT_INPUT_GRACE))))
