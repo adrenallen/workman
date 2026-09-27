@@ -420,7 +420,13 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         tools_summary["spawn_agent_guidance"]
             .as_str()
             .unwrap()
-            .contains("Prefer model for a per-launch override")
+            .contains("Template: set agent_template_id only")
+    );
+    assert!(
+        !tools_summary["spawn_agent_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("Prefer model")
     );
     assert!(
         tools_summary["idle_timer_wait_guidance"]
