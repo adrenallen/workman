@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::watch,
@@ -30,6 +31,7 @@ const TIMER_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 fn log_timer_error_rate_limited(
     timer_id: TimerId,
     error: &TimerError,
+    quarantined: bool,
     quarantine_error: Option<&TimerError>,
 ) {
     static LAST_LOGGED: OnceLock<Mutex<BTreeMap<TimerId, Instant>>> = OnceLock::new();
@@ -48,8 +50,10 @@ fn log_timer_error_rate_limited(
         eprintln!(
             "timer {timer_id} tick failed: {error}; quarantine persistence also failed: {quarantine_error}"
         );
-    } else {
+    } else if quarantined {
         eprintln!("timer {timer_id} tick failed and was quarantined: {error}");
+    } else {
+        eprintln!("timer {timer_id} tick failed and will be retried: {error}");
     }
 }
 
@@ -59,6 +63,10 @@ pub(crate) enum TimerError {
     Registry(RegistryError),
     CompletionLedger(CompletionLedgerError),
     Persistence(String),
+    InvalidPersistedTimer {
+        timer_id: TimerId,
+        message: String,
+    },
     NotFound(TimerId),
     Inactive(TimerId),
     EmptyWatchList,
@@ -77,9 +85,10 @@ pub(crate) enum TimerError {
 impl TimerError {
     pub(crate) const fn code(&self) -> &'static str {
         match self {
-            Self::Store(_) | Self::CompletionLedger(_) | Self::Persistence(_) => {
-                "timer_store_error"
-            }
+            Self::Store(_)
+            | Self::CompletionLedger(_)
+            | Self::Persistence(_)
+            | Self::InvalidPersistedTimer { .. } => "timer_store_error",
             Self::Registry(error) => error.code(),
             Self::NotFound(_) => "timer_not_found",
             Self::Inactive(_) => "timer_inactive",
@@ -92,6 +101,10 @@ impl TimerError {
             Self::CrossProjectTarget { .. } => "timer_cross_project_target",
         }
     }
+
+    fn is_deterministic_timer_data_error(&self) -> bool {
+        matches!(self, Self::InvalidPersistedTimer { .. })
+    }
 }
 
 impl fmt::Display for TimerError {
@@ -101,6 +114,12 @@ impl fmt::Display for TimerError {
             Self::Registry(error) => error.fmt(formatter),
             Self::CompletionLedger(error) => error.fmt(formatter),
             Self::Persistence(message) => formatter.write_str(message),
+            Self::InvalidPersistedTimer { timer_id, message } => {
+                write!(
+                    formatter,
+                    "timer {timer_id} has invalid persisted data: {message}"
+                )
+            }
             Self::NotFound(timer_id) => write!(formatter, "timer {timer_id} was not found"),
             Self::Inactive(timer_id) => write!(formatter, "timer {timer_id} is no longer active"),
             Self::EmptyWatchList => formatter.write_str("watch list must contain a process"),
@@ -747,44 +766,107 @@ impl<'a> TimerService<'a> {
                 Ok(Some(fire)) => fired.push(fire),
                 Ok(None) => {}
                 Err(error) => {
-                    // A corrupt/deleted target or one timer's persistence failure must not
-                    // spin forever or prevent later timers from being evaluated. Persisting
-                    // fired first removes the owner from waiting state; the fallback runtime
-                    // makes timer_list readable even when its prior JSON was corrupt.
-                    let quarantine_error = self.quarantine_timer(timer_id, now_ms).err();
-                    log_timer_error_rate_limited(timer_id, &error, quarantine_error.as_ref());
+                    // Corrupt JSON belongs to this timer and cannot heal on retry. Store,
+                    // registry, and ledger failures may be transient, so they stay pending.
+                    // Either way, one timer must not prevent later timers from being evaluated.
+                    if error.is_deterministic_timer_data_error() {
+                        match self.quarantine_timer(timer_id, now_ms) {
+                            Ok(fire) => {
+                                if let Some(fire) = fire {
+                                    fired.push(fire);
+                                }
+                                log_timer_error_rate_limited(timer_id, &error, true, None);
+                            }
+                            Err(quarantine_error) => log_timer_error_rate_limited(
+                                timer_id,
+                                &error,
+                                false,
+                                Some(&quarantine_error),
+                            ),
+                        }
+                    } else {
+                        log_timer_error_rate_limited(timer_id, &error, false, None);
+                    }
                 }
             }
         }
         Ok(fired)
     }
 
-    fn quarantine_timer(&self, timer_id: TimerId, now_ms: i64) -> TimerResult<()> {
-        let Some(mut timer) = self.registry.store().get_timer(timer_id)? else {
-            return Ok(());
+    fn quarantine_timer(
+        &mut self,
+        timer_id: TimerId,
+        now_ms: i64,
+    ) -> TimerResult<Option<TimerFire>> {
+        let Some(mut timer) = self.load_timer_for_quarantine(timer_id)? else {
+            return Ok(None);
         };
         if timer.fired {
-            return Ok(());
+            return Ok(None);
         }
+
+        // Match deadline delivery semantics: queue the wake before persisting the terminal
+        // timer state. If the row is readable but its delivery target is not, quarantine
+        // without delivery rather than retrying deterministic corruption forever.
+        let project_id = self
+            .registry
+            .get(timer.delivery_process_id)
+            .ok()
+            .map(|process| process.project_id);
+        let delivered = project_id.is_some()
+            && self
+                .registry
+                .submit_input(timer.delivery_process_id, timer.body.as_bytes())
+                .is_ok();
+
         timer.fired = true;
         timer.fired_at = Some(now_ms);
-        self.registry.store().put_timer(&timer)?;
-
         let mut diagnostics = TimerDiagnostics::default();
         diagnostics.record_error();
-        self.put_runtime(
-            timer.id,
-            &TimerRuntime {
-                due_at: timer.max_wait_deadline.unwrap_or(timer.created_at),
-                paused_at: None,
-                watch_state: BTreeMap::new(),
-                diagnostics,
-            },
-        )
+        let runtime = TimerRuntime {
+            due_at: timer.max_wait_deadline.unwrap_or(timer.created_at),
+            paused_at: None,
+            watch_state: BTreeMap::new(),
+            diagnostics,
+        };
+        self.persist_quarantined_timer(&timer, &runtime)?;
+
+        if !delivered {
+            return Ok(None);
+        }
+        if let Some(owner_process_id) = timer.owner_process_id
+            && owner_process_id != timer.delivery_process_id
+            && let Err(error) = CompletionLedger::new(self.registry.store()).record_input(
+                owner_process_id,
+                timer.delivery_process_id,
+                now_ms,
+            )
+        {
+            eprintln!(
+                "timer {} quarantine delivery ledger input failed for process {}: {error}",
+                timer.id, timer.delivery_process_id
+            );
+        }
+
+        Ok(Some(TimerFire {
+            timer_id: timer.id,
+            project_id: project_id.expect("delivered quarantine has a project"),
+            delivery_process_id: timer.delivery_process_id,
+            // Error quarantine is a deadline-style wake. The persisted TimerView carries
+            // the more precise fire_reason=error diagnostic.
+            reason: TimerFireReason::MaxWait,
+            fired_at: now_ms,
+            timer: self.view(timer, runtime)?,
+        }))
     }
 
     fn tick_one(&mut self, timer_id: TimerId, now_ms: i64) -> TimerResult<Option<TimerFire>> {
-        let Some(mut timer) = self.registry.store().get_timer(timer_id)? else {
+        let Some(mut timer) = self
+            .registry
+            .store()
+            .get_timer(timer_id)
+            .map_err(|error| classify_timer_row_error(timer_id, error))?
+        else {
             return Ok(None);
         };
         if timer.paused || timer.fired {
@@ -1092,9 +1174,9 @@ impl<'a> TimerService<'a> {
 
     fn put_runtime(&self, timer_id: TimerId, runtime: &TimerRuntime) -> TimerResult<()> {
         let watch_state = serde_json::to_string(&runtime.watch_state)
-            .map_err(|error| TimerError::Persistence(error.to_string()))?;
+            .map_err(|error| invalid_persisted_timer(timer_id, "watch state", error))?;
         let diagnostics = serde_json::to_string(&runtime.diagnostics)
-            .map_err(|error| TimerError::Persistence(error.to_string()))?;
+            .map_err(|error| invalid_persisted_timer(timer_id, "diagnostics", error))?;
         self.registry
             .store()
             .connection()
@@ -1117,6 +1199,85 @@ impl<'a> TimerService<'a> {
             )
             .map_err(persistence)?;
         Ok(())
+    }
+
+    fn load_timer_for_quarantine(&self, timer_id: TimerId) -> TimerResult<Option<Timer>> {
+        self.registry
+            .store()
+            .connection()
+            .query_row(
+                "SELECT id, owner_actor, owner_process_id, delivery_process_id, body, kind,
+                        watch_list, interval, loop, max_wait_deadline, paused, fired, fired_at,
+                        created_at
+                 FROM timers WHERE id = ?1",
+                [timer_id],
+                |row| {
+                    let watch_list = row.get::<_, String>(6)?;
+                    Ok(Timer {
+                        id: row.get(0)?,
+                        owner_actor: row.get(1)?,
+                        owner_process_id: row.get(2)?,
+                        delivery_process_id: row.get(3)?,
+                        body: row.get(4)?,
+                        kind: row.get(5)?,
+                        // A corrupt timer-row watch list is itself quarantinable. Preserve a
+                        // readable fallback so its body can still wake the owner once.
+                        watch_process_ids: serde_json::from_str(&watch_list).unwrap_or_default(),
+                        interval_ms: row.get(7)?,
+                        repeating: row.get(8)?,
+                        max_wait_deadline: row.get(9)?,
+                        paused: row.get(10)?,
+                        fired: row.get(11)?,
+                        fired_at: row.get(12)?,
+                        created_at: row.get(13)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(persistence)
+    }
+
+    fn persist_quarantined_timer(&self, timer: &Timer, runtime: &TimerRuntime) -> TimerResult<()> {
+        let watch_list = serde_json::to_string(&timer.watch_process_ids)
+            .map_err(|error| invalid_persisted_timer(timer.id, "watch list", error))?;
+        let watch_state = serde_json::to_string(&runtime.watch_state)
+            .map_err(|error| invalid_persisted_timer(timer.id, "watch state", error))?;
+        let diagnostics = serde_json::to_string(&runtime.diagnostics)
+            .map_err(|error| invalid_persisted_timer(timer.id, "diagnostics", error))?;
+        let transaction = self
+            .registry
+            .store()
+            .connection()
+            .unchecked_transaction()
+            .map_err(persistence)?;
+        transaction
+            .execute(
+                "UPDATE timers
+                 SET watch_list = ?1, fired = 1, fired_at = ?2
+                 WHERE id = ?3",
+                (&watch_list, timer.fired_at, timer.id),
+            )
+            .map_err(persistence)?;
+        transaction
+            .execute(
+                "INSERT INTO timer_runtime
+                    (timer_id, due_at, paused_at, watch_state, diagnostics)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(timer_id) DO UPDATE SET
+                    due_at = excluded.due_at,
+                    paused_at = excluded.paused_at,
+                    watch_state = excluded.watch_state,
+                    diagnostics = excluded.diagnostics",
+                (
+                    timer.id,
+                    runtime.due_at,
+                    runtime.paused_at,
+                    &watch_state,
+                    &diagnostics,
+                ),
+            )
+            .map_err(persistence)?;
+        transaction.commit().map_err(persistence)
     }
 
     fn get_runtime(&self, timer_id: TimerId) -> TimerResult<Option<TimerRuntime>> {
@@ -1147,9 +1308,9 @@ impl<'a> TimerService<'a> {
             return Ok(None);
         };
         let watch_state = serde_json::from_str(&watch_state)
-            .map_err(|error| TimerError::Persistence(error.to_string()))?;
+            .map_err(|error| invalid_persisted_timer(timer_id, "watch state", error))?;
         let diagnostics = serde_json::from_str(&diagnostics)
-            .map_err(|error| TimerError::Persistence(error.to_string()))?;
+            .map_err(|error| invalid_persisted_timer(timer_id, "diagnostics", error))?;
         Ok(Some(TimerRuntime {
             due_at,
             paused_at,
@@ -1385,6 +1546,28 @@ fn persistence(error: impl fmt::Display) -> TimerError {
     TimerError::Persistence(error.to_string())
 }
 
+fn invalid_persisted_timer(timer_id: TimerId, field: &str, error: impl fmt::Display) -> TimerError {
+    TimerError::InvalidPersistedTimer {
+        timer_id,
+        message: format!("invalid {field}: {error}"),
+    }
+}
+
+fn classify_timer_row_error(timer_id: TimerId, error: StoreError) -> TimerError {
+    let is_json_deserialization = match &error {
+        StoreError::Json(_) => true,
+        StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(_, _, source)) => {
+            source.downcast_ref::<serde_json::Error>().is_some()
+        }
+        _ => false,
+    };
+    if is_json_deserialization {
+        invalid_persisted_timer(timer_id, "timer row", error)
+    } else {
+        TimerError::Store(error)
+    }
+}
+
 pub(crate) fn spawn_timer_scheduler(
     registry: SharedProcessRegistry,
     events: TimerLifecycleHub,
@@ -1479,7 +1662,7 @@ pub(crate) fn now_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, thread, time::Instant};
+    use std::{collections::BTreeMap, sync::mpsc, thread, time::Instant};
 
     use workman_core::{
         Actor, AgentTool, Process, ProcessKind, ProcessSource, ProcessStatus, Project, Store,
@@ -1500,6 +1683,10 @@ mod tests {
 
     fn test_registry(start_worker: bool) -> ProcessRegistry {
         let store = Store::open_in_memory().unwrap();
+        test_registry_with_store(store, start_worker)
+    }
+
+    fn test_registry_with_store(store: Store, start_worker: bool) -> ProcessRegistry {
         store
             .put_project(&Project {
                 id: PROJECT_ID,
@@ -2845,7 +3032,7 @@ mod tests {
             .set_delay(
                 "bad-timer".into(),
                 DELIVERY_ID,
-                "must not deliver".into(),
+                "bad timer deadline-style wake".into(),
                 0,
                 false,
                 None,
@@ -2879,8 +3066,14 @@ mod tests {
             .unwrap();
 
         let fires = TimerService::new(&mut registry).tick(1_000).unwrap();
-        assert_eq!(fires.len(), 1);
-        assert_eq!(fires[0].timer_id, good_id);
+        assert_eq!(fires.len(), 2);
+        assert!(fires.iter().any(|fire| fire.timer_id == good_id));
+        let bad_fire = fires.iter().find(|fire| fire.timer_id == bad_id).unwrap();
+        assert_eq!(bad_fire.reason, TimerFireReason::MaxWait);
+        assert_eq!(
+            bad_fire.timer.fire_reason,
+            Some(TimerSatisfactionReason::Error)
+        );
         let bad_timer = registry.store().get_timer(bad_id).unwrap().unwrap();
         assert!(bad_timer.fired, "the broken timer must be quarantined");
         assert_eq!(bad_timer.fired_at, Some(1_000));
@@ -2909,11 +3102,94 @@ mod tests {
             DELIVERY_ID,
             "received:[later timer delivered]",
         );
+        wait_for_output(
+            &mut registry,
+            DELIVERY_ID,
+            "received:[bad timer deadline-style wake]",
+        );
         let output = registry.rendered_output(DELIVERY_ID).unwrap().text;
-        assert!(!output.contains("must not deliver"));
+        assert_eq!(
+            output
+                .matches("received:[bad timer deadline-style wake]")
+                .count(),
+            1
+        );
         assert_eq!(
             output.matches("received:[later timer delivered]").count(),
             1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transient_sqlite_lock_does_not_quarantine_a_healthy_timer() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("workman.sqlite3");
+        let store = Store::open(&database).unwrap();
+        let mut registry = test_registry_with_store(store, true);
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+
+        let timer_id = match TimerService::new(&mut registry)
+            .set_idle(
+                "lock-retry-owner".into(),
+                DELIVERY_ID,
+                "healthy timer delivered".into(),
+                TimerKind::IdleAny,
+                vec![WORKER_ID],
+                60_000,
+                now_millis(),
+            )
+            .unwrap()
+        {
+            IdleTimerOutcome::Created(view) => view.timer.id,
+            IdleTimerOutcome::AlreadySatisfied { .. } => {
+                panic!("an already-idle worker must not satisfy idle_any")
+            }
+        };
+
+        let lock_connection = rusqlite::Connection::open(&database).unwrap();
+        let (locked_tx, locked_rx) = mpsc::sync_channel(0);
+        let lock_thread = thread::spawn(move || {
+            lock_connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(5_600));
+            lock_connection.execute_batch("COMMIT").unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let tick_started = Instant::now();
+        assert!(
+            TimerService::new(&mut registry)
+                .tick(now_millis())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(tick_started.elapsed() >= Duration::from_secs(5));
+        lock_thread.join().unwrap();
+        let timer = registry.store().get_timer(timer_id).unwrap().unwrap();
+        assert!(
+            !timer.fired,
+            "a transient lock must leave the timer pending"
+        );
+
+        registry.submit_input(WORKER_ID, b"go").unwrap();
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Working);
+        assert!(
+            TimerService::new(&mut registry)
+                .tick(now_millis())
+                .unwrap()
+                .is_empty(),
+            "the working observation should arm the idle transition"
+        );
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        let fires = TimerService::new(&mut registry).tick(now_millis()).unwrap();
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].timer_id, timer_id);
+        assert_eq!(fires[0].reason, TimerFireReason::IdleTransition);
+        wait_for_output(
+            &mut registry,
+            DELIVERY_ID,
+            "received:[healthy timer delivered]",
         );
     }
 
