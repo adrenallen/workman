@@ -46,7 +46,8 @@ export function markdownCodeBlocks(source: string): MarkdownCodeBlock[] {
   for (const line of source.split('\n')) {
     const to = from + line.length;
     if (open) {
-      const closing = fenceAt(line, open.containerIndent);
+      const closing = fenceAt(line, open.containerIndent) ??
+        (open.containerIndent > 0 ? fenceAt(line, null) : null);
       if (
         closing &&
         closing.marker[0] === open.marker[0] &&

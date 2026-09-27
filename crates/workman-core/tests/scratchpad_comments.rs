@@ -212,6 +212,30 @@ fn table_formatting_reanchors_only_a_unique_tolerant_context() {
         Some(" |\n"),
     );
     assert_eq!(ambiguous.anchor_state, ScratchpadAnchorState::Orphaned);
+
+    let boundary_before = "| A | B |\n| - | - |\n| target   | 1 |";
+    let boundary_start = boundary_before.find("target").unwrap();
+    let boundary = resolve_scratchpad_anchor(
+        "| A      | B   |\n| ------ | --- |\n| target | 1   |",
+        Some("target "),
+        Some(boundary_start),
+        Some(boundary_start + "target ".len()),
+        Some(&boundary_before[..boundary_start]),
+        Some(&boundary_before[boundary_start + "target ".len()..]),
+    );
+    assert_eq!(boundary.anchor_state, ScratchpadAnchorState::Anchored);
+    assert_eq!(boundary.current_start, Some(36));
+    assert_eq!(boundary.current_end, Some(42));
+
+    for whitespace in ['\u{feff}', '\u{0085}'] {
+        let quote = format!("A{whitespace}target");
+        let resolution =
+            resolve_scratchpad_anchor("A target", Some(&quote), None, None, None, None);
+        assert_eq!(resolution.anchor_state, ScratchpadAnchorState::Orphaned);
+    }
+    let nbsp =
+        resolve_scratchpad_anchor("A target", Some("A\u{00a0}target"), None, None, None, None);
+    assert_eq!(nbsp.anchor_state, ScratchpadAnchorState::Anchored);
 }
 
 #[test]

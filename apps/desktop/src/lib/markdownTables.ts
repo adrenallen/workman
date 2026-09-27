@@ -1,4 +1,4 @@
-import { markdownCodeBlocks } from './markdownCodeBlocks';
+import { markdownCodeBlocks, type MarkdownCodeBlock } from './markdownCodeBlocks';
 
 export type MarkdownTableAlignment = 'left' | 'center' | 'right' | null;
 
@@ -122,10 +122,9 @@ function delimiterAlignment(text: string): MarkdownTableAlignment | undefined {
   return null;
 }
 
-function sourceLines(markdown: string): SourceLine[] {
+function sourceLines(markdown: string, blocks: readonly MarkdownCodeBlock[]): SourceLine[] {
   const lines: SourceLine[] = [];
   let from = 0;
-  const blocks = markdownCodeBlocks(markdown);
   let blockIndex = 0;
   const rawLines = markdown.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
   for (let index = 0; index < rawLines.length; index += 1) {
@@ -167,8 +166,11 @@ function startsMarkdownBlock(line: string): boolean {
     /^\s*(?:-{3,}|_{3,}|\*{3,})\s*$/.test(line);
 }
 
-export function parseMarkdownTables(markdown: string): MarkdownTable[] {
-  const lines = sourceLines(markdown);
+export function parseMarkdownTables(
+  markdown: string,
+  blocks: readonly MarkdownCodeBlock[] = markdownCodeBlocks(markdown)
+): MarkdownTable[] {
+  const lines = sourceLines(markdown, blocks);
   const tables: MarkdownTable[] = [];
   for (let index = 0; index + 1 < lines.length;) {
     const headerLine = lines[index];
@@ -373,6 +375,17 @@ export function tableAtPosition(
   return tables.find((table) => position >= table.from && position <= table.to) ?? null;
 }
 
+export function markdownTableHeaderStartsAt(
+  markdown: string,
+  table: MarkdownTable,
+  position: number
+): boolean {
+  const source = markdown.slice(table.header.from, table.header.to);
+  const leading = /^ */.exec(source)?.[0].length ?? 0;
+  const beforeFirstCell = table.header.from + leading + (source[leading] === '|' ? 1 : 0);
+  return position <= beforeFirstCell;
+}
+
 export function navigableTableCells(table: MarkdownTable): MarkdownTableCell[] {
   return [table.header, ...table.rows].flatMap((row) => row.cells);
 }
@@ -410,8 +423,9 @@ export function parseMarkdownInline(
   const emphasis = tableCell
     ? '|(?<![\\w*])\\*(?![\\s*])(?<emStar>[^*\\n]*?\\S)\\*(?!\\*)|(?<![\\w_])_(?![\\s_])(?<emUnderscore>[^_\\n]*?\\S)_(?![\\w_])'
     : '';
+  const strongUnderscore = tableCell ? '|__(?<strongUnderscore>[^_\\n]+)__' : '';
   const pattern = new RegExp(
-    `(?<ticks>` + '`+' + `)(?<code>[^\\n]*?)\\k<ticks>|\\*\\*(?<strongStar>[^*\\n]+)\\*\\*|__(?<strongUnderscore>[^_\\n]+)__${emphasis}|\\[(?<label>[^\\]\\n]+)\\]\\((?<href>[^)\\n]+)\\)`,
+    `(?<ticks>` + '`+' + `)(?<code>[^\\n]*?)\\k<ticks>|\\*\\*(?<strongStar>[^*\\n]+)\\*\\*${strongUnderscore}${emphasis}|\\[(?<label>[^\\]\\n]+)\\]\\((?<href>[^)\\n]+)\\)`,
     'g'
   );
   const display = (value: string): string => tableCell ? unescapeTablePipes(value) : value;
@@ -421,7 +435,7 @@ export function parseMarkdownInline(
     const groups = match.groups ?? {};
     if (start > offset) tokens.push({ kind: 'text', text: display(text.slice(offset, start)) });
     if (groups.code !== undefined) {
-      tokens.push({ kind: 'code', text: groups.code });
+      tokens.push({ kind: 'code', text: display(groups.code) });
     } else if (groups.strongStar !== undefined || groups.strongUnderscore !== undefined) {
       tokens.push({ kind: 'strong', text: display(groups.strongStar ?? groups.strongUnderscore) });
     } else if (groups.emStar !== undefined || groups.emUnderscore !== undefined) {

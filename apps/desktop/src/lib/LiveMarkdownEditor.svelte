@@ -54,6 +54,7 @@
     formatMarkdownTable,
     mapMarkdownTableCellPosition,
     markdownTableFormattingChanges,
+    markdownTableHeaderStartsAt,
     navigableTableCells,
     parseMarkdownInline,
     parseMarkdownTables,
@@ -145,7 +146,7 @@
         state,
         false,
         resolveTableComments(content, state),
-        parseMarkdownTables(content)
+        parseMarkdownTables(content, state.field(codeBlocks))
       );
     },
     update(current, transaction) {
@@ -163,7 +164,9 @@
         transaction.state,
         focused,
         tableComments,
-        content === null ? current.tables : parseMarkdownTables(content)
+        content === null
+          ? current.tables
+          : parseMarkdownTables(content, transaction.state.field(codeBlocks))
       );
     },
     provide: (field) => EditorView.decorations.from(field, (value) => value.decorations)
@@ -1074,10 +1077,10 @@
     const currentRow = [table.header, table.delimiter, ...table.rows]
       .find((row) => position >= row.from && position <= row.to);
     if (!currentRow) return false;
-    const currentColumn = currentRow.cells.findIndex((cell) =>
-      position >= cell.from && position <= cell.to
-    );
-    if (currentRow === table.header && currentColumn === 0) {
+    if (
+      currentRow === table.header &&
+      markdownTableHeaderStartsAt(editor.state.doc.toString(), table, position)
+    ) {
       editor.dispatch({
         changes: { from: table.from, insert: '\n' },
         selection: { anchor: table.from },

@@ -7,7 +7,7 @@ import { ChangeSet, Text } from '@codemirror/state';
 const sourcePath = new URL('../src/lib/markdownTables.ts', import.meta.url);
 const source = await readFile(sourcePath, 'utf8');
 const codeBlocks = await readFile(new URL('../src/lib/markdownCodeBlocks.ts', import.meta.url), 'utf8');
-const combined = `${source.replace("import { markdownCodeBlocks } from './markdownCodeBlocks';", '')}\n${codeBlocks}`;
+const combined = `${source.replace("import { markdownCodeBlocks, type MarkdownCodeBlock } from './markdownCodeBlocks';", '')}\n${codeBlocks}`;
 const output = ts.transpileModule(combined, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
 }).outputText;
@@ -16,6 +16,7 @@ const {
   formatMarkdownTable,
   mapMarkdownTableCellPosition,
   markdownTableFormattingChanges,
+  markdownTableHeaderStartsAt,
   navigableTableCells,
   parseMarkdownInline,
   parseMarkdownTables,
@@ -165,6 +166,9 @@ test('preserves header indentation on every formatted row and shares list-aware 
   ].join('\n'));
   const fenced = '- item\n  ```md\n  fake | table\n  --- | ---\n  ```\n\nreal | table\n--- | ---';
   assert.deepEqual(parseMarkdownTables(fenced).map((candidate) => candidate.header.cells[0].text), ['real']);
+
+  const lenientClose = '- Install\n  ```bash\n  npm test\n```\n\nNext | Value\n--- | ---';
+  assert.deepEqual(parseMarkdownTables(lenientClose).map((candidate) => candidate.header.cells[0].text), ['Next']);
 });
 
 test('keeps non-table inline rendering compatible and unescapes only table-cell pipes', () => {
@@ -179,6 +183,21 @@ test('keeps non-table inline rendering compatible and unescapes only table-cell 
   assert.deepEqual(parseMarkdownInline('2 * 3 * 4', { tableCell: true }), [
     { kind: 'text', text: '2 * 3 * 4' }
   ]);
+  assert.deepEqual(parseMarkdownInline('Python __init__ and __main__'), [
+    { kind: 'text', text: 'Python __init__ and __main__' }
+  ]);
+  assert.deepEqual(parseMarkdownInline('`a\\|b`', { tableCell: true }), [
+    { kind: 'code', text: 'a|b' }
+  ]);
+});
+
+test('only Enter before the first header content inserts above the table', () => {
+  const source = '| Name | Value |\n| --- | --- |\n| one | two |';
+  const [table] = parseMarkdownTables(source);
+  assert.equal(markdownTableHeaderStartsAt(source, table, table.header.from), true);
+  assert.equal(markdownTableHeaderStartsAt(source, table, table.header.from + 1), true);
+  assert.equal(markdownTableHeaderStartsAt(source, table, table.header.cells[0].to), false);
+  assert.equal(markdownTableHeaderStartsAt(source, table, table.header.cells[1].from + 1), false);
 });
 
 test('downgrades unsafe rendered links to their literal Markdown source', () => {

@@ -1625,6 +1625,27 @@ struct TolerantText {
     utf16_ranges: Vec<(usize, usize)>,
 }
 
+fn is_tolerant_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'
+            ..='\u{000d}'
+                | '\u{0020}'
+                | '\u{00a0}'
+                | '\u{1680}'
+                | '\u{2000}'..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+    )
+}
+
+fn is_tolerant_separator(character: char) -> bool {
+    character == '-' || is_tolerant_whitespace(character)
+}
+
 fn tolerant_text(source: &str) -> TolerantText {
     let mut text = String::with_capacity(source.len());
     let mut utf16_ranges = Vec::with_capacity(source.chars().count());
@@ -1633,11 +1654,11 @@ fn tolerant_text(source: &str) -> TolerantText {
     while let Some(character) = characters.next() {
         let start = utf16_offset;
         utf16_offset += character.len_utf16();
-        if character.is_whitespace() || character == '-' {
-            let collapse_whitespace = character.is_whitespace();
+        if is_tolerant_whitespace(character) || character == '-' {
+            let collapse_whitespace = is_tolerant_whitespace(character);
             while characters.peek().is_some_and(|next| {
                 if collapse_whitespace {
-                    next.is_whitespace()
+                    is_tolerant_whitespace(*next)
                 } else {
                     *next == '-'
                 }
@@ -1653,21 +1674,76 @@ fn tolerant_text(source: &str) -> TolerantText {
     TolerantText { text, utf16_ranges }
 }
 
+fn longest_tolerant_literal_run(source: &str) -> &str {
+    let mut longest = (0, 0);
+    let mut run_start = 0;
+    for (index, character) in source.char_indices() {
+        if !is_tolerant_separator(character) {
+            continue;
+        }
+        if index - run_start > longest.1 - longest.0 {
+            longest = (run_start, index);
+        }
+        run_start = index + character.len_utf8();
+    }
+    if source.len() - run_start > longest.1 - longest.0 {
+        longest = (run_start, source.len());
+    }
+    &source[longest.0..longest.1]
+}
+
+fn tolerant_anchor_parts(
+    quote: &str,
+    anchor_prefix: Option<&str>,
+    anchor_suffix: Option<&str>,
+) -> (String, Option<String>, Option<String>) {
+    let start = quote
+        .char_indices()
+        .find(|(_, character)| !is_tolerant_separator(*character))
+        .map_or(quote.len(), |(index, _)| index);
+    let end = quote
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !is_tolerant_separator(*character))
+        .map_or(start, |(index, character)| index + character.len_utf8())
+        .max(start);
+    let leading = &quote[..start];
+    let trailing = &quote[end..];
+    let prefix = if anchor_prefix.is_some() || !leading.is_empty() {
+        Some(format!("{}{}", anchor_prefix.unwrap_or_default(), leading))
+    } else {
+        None
+    };
+    let suffix = if anchor_suffix.is_some() || !trailing.is_empty() {
+        Some(format!("{}{}", trailing, anchor_suffix.unwrap_or_default()))
+    } else {
+        None
+    };
+    (quote[start..end].to_owned(), prefix, suffix)
+}
+
 fn tolerant_anchor_range(
     content: &str,
     quote: &str,
     anchor_prefix: Option<&str>,
     anchor_suffix: Option<&str>,
 ) -> Option<(usize, usize)> {
+    let (quote, prefix, suffix) = tolerant_anchor_parts(quote, anchor_prefix, anchor_suffix);
+    let literal = longest_tolerant_literal_run(&quote);
+    if literal.is_empty() || !content.contains(literal) {
+        return None;
+    }
     let content = tolerant_text(content);
-    let quote = tolerant_text(quote).text;
+    let quote = tolerant_text(&quote).text;
     if quote.is_empty() {
         return None;
     }
-    let prefix = anchor_prefix
+    let prefix = prefix
+        .as_deref()
         .filter(|value| !value.is_empty())
         .map(tolerant_text);
-    let suffix = anchor_suffix
+    let suffix = suffix
+        .as_deref()
         .filter(|value| !value.is_empty())
         .map(tolerant_text);
     let mut matches = Vec::new();
