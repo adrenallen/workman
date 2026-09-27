@@ -31,7 +31,9 @@ use super::{
 };
 use crate::{
     ProcessRegistry,
+    completion_ledger::CompletionLedger,
     process_registry::{StagedAgentAttachments, stage_agent_attachments},
+    timers::now_millis,
 };
 
 const WORKMAN_ATTACHMENT_SOURCE_DIRECTORIES: &[&str] = &[
@@ -1201,8 +1203,8 @@ pub(crate) async fn spawn_registered_agent(
                 result.process_id,
                 prompt,
                 is_kimi_tool_type(&resolved.agent_tool_type),
-                spawned_by_process_id,
                 pending_prompt.expect("scheduled initial prompt was reserved during spawn"),
+                spawned_by_process_id,
             );
         }
     }
@@ -1468,8 +1470,8 @@ fn schedule_initial_prompt(
     process_id: ProcessId,
     prompt: String,
     verify_kimi_submission: bool,
-    owner_process_id: Option<ProcessId>,
     pending_prompt: PendingPrompt,
+    owner_process_id: Option<ProcessId>,
 ) {
     tokio::spawn(async move {
         // Hold the reservation through readiness polling and verification. The
@@ -1549,17 +1551,15 @@ fn schedule_initial_prompt(
                         } else {
                             registry.submit_input(process_id, prompt.as_bytes())
                         }
-                        .and_then(|process| {
-                            if let Some(owner_process_id) = owner_process_id
-                                && let Some(input_at) =
-                                    registry.agent_attention_snapshot(process_id)?.last_input_at
-                            {
-                                crate::completion_ledger::CompletionLedger::new(registry.store())
-                                    .record_input(owner_process_id, process_id, input_at)?;
+                        .map_err(|error| error.to_string());
+                        let result = result.and_then(|process| {
+                            if let Some(owner_process_id) = owner_process_id {
+                                CompletionLedger::new(registry.store())
+                                    .record_input(owner_process_id, process_id, now_millis())
+                                    .map_err(|error| error.to_string())?;
                             }
                             Ok(process)
-                        })
-                        .map_err(|error| error.to_string());
+                        });
                         match &result {
                             Ok(_) if verify_kimi_submission => {
                                 let _ = registry.record_process_event(

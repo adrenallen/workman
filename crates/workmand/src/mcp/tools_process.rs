@@ -14,7 +14,9 @@ use serde_json::json;
 use workman_core::{Actor, Process, ProcessId, ProjectId};
 
 use super::{WorkmanMcp, failure, scoped_project, success};
-use crate::{ProcessRegistry, RegistryError};
+use crate::{
+    ProcessRegistry, RegistryError, completion_ledger::CompletionLedger, timers::now_millis,
+};
 
 const DEFAULT_OUTPUT_LINES: usize = 50;
 const MAX_OUTPUT_LINES: usize = 200;
@@ -609,20 +611,14 @@ impl WorkmanMcp {
         if let Err(error) = sent {
             return registry_failure(error);
         }
-
         if let Some(owner_process_id) = owner_process_id {
             let registry = self.registry.lock().await;
-            let input_at = match registry.agent_attention_snapshot(process_id) {
-                Ok(state) => state.last_input_at,
-                Err(error) => return registry_failure(error),
-            };
-            if let Some(input_at) = input_at
-                && let Err(error) = crate::completion_ledger::CompletionLedger::new(
-                    registry.store(),
-                )
-                .record_input(owner_process_id, process_id, input_at)
-            {
-                return failure("store_error", error.to_string());
+            if let Err(error) = CompletionLedger::new(registry.store()).record_input(
+                owner_process_id,
+                process_id,
+                now_millis(),
+            ) {
+                return failure("completion_ledger_error", error.to_string());
             }
         }
 

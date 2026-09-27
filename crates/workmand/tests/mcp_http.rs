@@ -264,10 +264,13 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         .and_then(|info| info.instructions.clone())
         .expect("Workman advertises MCP server instructions");
     assert!(server_instructions.contains("timer delivers back to you"));
+    assert!(server_instructions.contains("idle process with an unreported completion"));
     assert!(
-        server_instructions.contains("timer_fire_when_idle_any ignores processes already idle")
+        server_instructions
+            .contains("a process you never prompted always requires a fresh transition")
     );
-    assert!(server_instructions.contains("timer_fire_when_idle_all counts already-idle processes"));
+    assert!(server_instructions.contains("timer_fire_when_idle_all counts processes already idle"));
+    assert!(server_instructions.contains("already_idle and satisfied_by diagnostics"));
     assert!(
         server_instructions.contains("Do not loop on timer_list or process status while waiting")
     );
