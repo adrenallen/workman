@@ -47,7 +47,7 @@ mod tools_worktree;
 pub const WORKMAN_MCP_TOKEN_HEADER: &str = "x-workman-mcp-token";
 pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. Review feedback with scratchpad_read(include_comments=true), and use scratchpad_comment_create for anchored or whole-document discussion. Agents may update, resolve, reopen, or delete only comments they authored; the human may resolve any project comment. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
 pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then use todo_update(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_update(assignee=\"none\") to unassign.";
-pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Template summaries include launch settings. Use a template only when the user names a template or explicitly asks for one. The template supplies its tool, launch args, and prompt. A tool override carries the template model only for the same agent type; compatible Claude/Codex effort may carry, and command defaults never carry. A selected model arg supersedes the registered command model; an explicit caller model also replaces template and caller model flags. resolved reports effective settings and skipped template args. Set notify_spawner_on_idle=true for a coalesced completion turn; update_process can toggle an existing direct child. Delivery never merges into the human's unsent draft.";
+pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Use a template only when the user names a template or explicitly asks for one. Template: set agent_template_id only; the template supplies its agent tool, model, effort, launch args and prompt, and initial_prompt is appended. Pass model or agent_tool_id only to override. An override keeps the template's model only for the same agent type; compatible Claude/Codex effort may carry, and command defaults never carry. A selected model supersedes the registered command model; an explicit caller model also replaces template and caller model flags. resolved reports effective settings, skipped template args, and whether Workman MCP is wired. Set notify_spawner_on_idle=true for a coalesced completion turn; update_process can toggle an existing direct child. Delivery never merges into the human's unsent draft.";
 pub(crate) const IDLE_TIMER_WAIT_GUIDANCE: &str = "For a child spawned with notify_spawner_on_idle=true, no timer is needed for ordinary completion wake-up. The opt-in is prospective and survives child exit, crash, and restart. Keep a delay timer when a hung-child deadline matters. For other waits, call timer_fire_when_idle once with wait_for=\"any\" or wait_for=\"all\". any may deliver immediately for a newly reported completion; all counts processes already idle at arm time. Arm results expose already_idle and satisfied_by diagnostics. deadline means the timeout fired without reporting completion. When already_satisfied=false and the timer delivers to this agent, finish the response and end the turn; do not poll timer_list or process status. When the fresh turn arrives, inspect watched processes because the deadline may have fired or an agent may be waiting on its own timer.";
 const SERVER_INSTRUCTIONS: &str = "Need human input or found out-of-scope work? Create a todo or comment, then use todo_update(assignee=\"user\") or mention @user in a new todo comment; either notifies the human. Call whoami first. Process credentials jail agents to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions have discovery and help only. Use help for todos, scratchpads, worktrees, timers, tools, and spawning.";
 
@@ -209,7 +209,7 @@ struct IdentityResult {
 #[tool_router]
 impl WorkmanMcp {
     #[tool(
-        description = "Report this MCP session's actor, process, and effective project identity"
+        description = "Report this MCP session's actor, process, and effective project envelope"
     )]
     async fn whoami(&self, Extension(parts): Extension<Parts>) -> CallToolResult {
         let mut registry = self.registry.lock().await;
@@ -244,8 +244,30 @@ impl WorkmanMcp {
     }
 
     #[tool(description = "Show concise Workman MCP help, optionally for one topic")]
-    async fn help(&self, Parameters(args): Parameters<HelpArgs>) -> CallToolResult {
+    async fn help(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<HelpArgs>,
+    ) -> CallToolResult {
         let topic = args.topic.as_deref().unwrap_or("setup");
+        if topic == "tools" {
+            let process_identity = self.parts_have_process_identity(&parts).await;
+            let mut tools = self
+                .tool_router
+                .list_all()
+                .into_iter()
+                .filter(|tool| !process_identity || tool.name.as_ref() != "agent_tool_configure")
+                .map(|tool| {
+                    format!(
+                        "{} — {}",
+                        tool.name,
+                        tool.description.as_deref().unwrap_or("No description")
+                    )
+                })
+                .collect::<Vec<_>>();
+            tools.sort();
+            return success(json!({ "topic": topic, "text": tools.join("\n") }));
+        }
         let text = match topic {
             "setup" => {
                 "Connect to /mcp with Streamable HTTP. Daemon-spawned agents authenticate with their process credential and are automatically jailed to their owning project. A daemon bearer authenticates user-level discovery only and cannot claim a process identity."
@@ -265,7 +287,6 @@ impl WorkmanMcp {
                 "Use worktree_list to inspect repository worktrees and cached pull-request status. Creation, adoption, and removal stay in the authenticated UI/CLI control channel."
             }
             "timers" => IDLE_TIMER_WAIT_GUIDANCE,
-            "tools" => "Use the MCP tools/list request for the complete tool list and schemas.",
             "spawning" => SPAWN_AGENT_GUIDANCE,
             other => {
                 return failure(
@@ -357,10 +378,7 @@ impl ServerHandler for WorkmanMcp {
 }
 
 impl WorkmanMcp {
-    async fn request_has_process_identity(&self, context: &RequestContext<RoleServer>) -> bool {
-        let Some(parts) = context.extensions.get::<Parts>() else {
-            return false;
-        };
+    async fn parts_have_process_identity(&self, parts: &Parts) -> bool {
         let token = parts
             .headers
             .get(WORKMAN_MCP_TOKEN_HEADER)
@@ -378,6 +396,13 @@ impl WorkmanMcp {
             .ok()
             .flatten()
             .is_some()
+    }
+
+    async fn request_has_process_identity(&self, context: &RequestContext<RoleServer>) -> bool {
+        let Some(parts) = context.extensions.get::<Parts>() else {
+            return false;
+        };
+        self.parts_have_process_identity(parts).await
     }
 }
 

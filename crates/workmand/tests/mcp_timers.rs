@@ -234,7 +234,8 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
         .expect("timer_set tool is present");
     let timer_set_description = timer_set_tool.description.as_deref().unwrap_or_default();
     assert!(timer_set_description.contains("one-shot or repeating"));
-    assert!(timer_set_description.contains("delivery to the user"));
+    assert!(timer_set_description.contains("to an agent (default: the caller)"));
+    assert!(!timer_set_description.contains("to the user"));
     assert!(timer_set_description.contains("do not poll while waiting"));
     assert!(
         timer_set_tool.input_schema["properties"]["body"]["description"]
@@ -248,13 +249,21 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
         .iter()
         .find(|tool| tool.name == "timer_fire_when_idle")
         .expect("timer_fire_when_idle tool is present");
+    assert!(idle_tool.description.as_deref().is_some_and(|description| {
+        description.contains("unreported completion since the caller's last input")
+            && description.contains("fresh busy-to-idle transition")
+            && description.contains("counting agents already idle")
+            && description.contains("fresh user turn")
+            && description.contains("end the turn and do not poll")
+    }));
     assert!(
-        idle_tool
-            .description
-            .as_deref()
-            .is_some_and(|description| description.contains("any or every"))
+        idle_tool.input_schema["properties"]["wait_for"]["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("first agent with an unreported completion")
+                    && description.contains("counts ones already idle")
+            })
     );
-    assert!(idle_tool.input_schema["properties"]["wait_for"].is_object());
 
     let delayed = call(
         &owner,

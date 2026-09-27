@@ -316,11 +316,15 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             .description
             .as_deref()
             .is_some_and(|description| {
-                description.contains("template model only within the same agent type")
-                    && description.contains("never carry command defaults")
-                    && description.contains("supersedes the registered command model")
-                    && description.contains("explicit caller model also replaces")
-                    && description.contains("resolved reports")
+                description.contains("Template: set agent_template_id only")
+                    && description
+                        .contains("supplies its agent tool, model, effort, launch args and prompt")
+                    && description.contains("initial_prompt is appended")
+                    && description.contains("Pass model or agent_tool_id only to override")
+                    && description.contains(
+                        "override keeps the template's model only for the same agent type",
+                    )
+                    && description.contains("mcp_wired")
                     && !description.contains("preferred")
             })
     );
@@ -377,13 +381,23 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     let tools = call(&parent, "list_agent_tools", json!({})).await;
     assert!(tools["agent_tools"].as_array().unwrap().iter().any(|tool| {
         tool["name"] == "Claude"
+            && tool["mcp_wired"] == true
             && tool["command"]
                 .as_str()
                 .is_some_and(|command| command.starts_with("claude"))
     }));
     assert!(tools["agent_tools"].as_array().unwrap().iter().any(|tool| {
-        tool["id"] == 99 && tool["command"] == fake_agent.to_string_lossy().as_ref()
+        tool["id"] == 99
+            && tool["mcp_wired"] == false
+            && tool["command"] == fake_agent.to_string_lossy().as_ref()
     }));
+    assert!(
+        tools["agent_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| { tool["id"] == 105 && tool["mcp_wired"] == false })
+    );
     let templates = &tools;
     assert_eq!(templates["agent_templates"].as_array().unwrap().len(), 4);
     assert_eq!(templates["agent_templates"][0]["id"], 300);
@@ -469,6 +483,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Model capture agent",
             "model": "command-default",
             "effort": "agent default",
+            "mcp_wired": true,
             "template_args_skipped": []
         })
     );
@@ -576,6 +591,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Swap model agent",
             "model": "swapped/provider-model",
             "effort": "agent default",
+            "mcp_wired": true,
             "template_args_skipped": ["--review"]
         })
     );
@@ -616,6 +632,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Portable Codex agent",
             "model": "template-model",
             "effort": "high",
+            "mcp_wired": true,
             "template_args_skipped": ["--review"]
         })
     );
@@ -655,6 +672,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Model capture agent",
             "model": "template-model",
             "effort": "high",
+            "mcp_wired": true,
             "template_args_skipped": []
         })
     );
@@ -694,6 +712,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Custom agent",
             "model": "agent default",
             "effort": "agent default",
+            "mcp_wired": false,
             "template_args_skipped": [
                 "--model",
                 "template-model",
@@ -728,6 +747,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Shell-composed Claude",
             "model": "fable",
             "effort": "agent default",
+            "mcp_wired": true,
             "template_args_skipped": []
         })
     );
