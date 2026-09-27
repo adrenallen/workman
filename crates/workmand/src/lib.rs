@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 mod agent_sessions;
 mod command_line;
+mod completion_ledger;
 #[cfg(all(test, unix))]
 mod shell_test_support;
 pub mod config;
