@@ -1507,6 +1507,62 @@ fn is_composer_placeholder(marker: char, draft: &str) -> bool {
         )
 }
 
+fn opencode_composer_draft(rows: &[crate::terminal::RenderedRow]) -> Option<ComposerDraft> {
+    for border_index in (0..rows.len()).rev() {
+        let border = rows[border_index].text.trim_start();
+        if !border.starts_with("╹▀") || border_index == 0 {
+            continue;
+        }
+
+        let mut rail_rows = Vec::new();
+        let mut index = border_index;
+        while index > 0 {
+            let candidate = &rows[index - 1];
+            let Some(rail_cell) = candidate
+                .cells
+                .iter()
+                .position(|cell| !cell.character.is_whitespace())
+                .filter(|offset| candidate.cells[*offset].character == '┃')
+            else {
+                break;
+            };
+            rail_rows.push((candidate, rail_cell));
+            index -= 1;
+        }
+        if rail_rows.is_empty() {
+            continue;
+        }
+        rail_rows.reverse();
+        // OpenCode's last rail is agent/model metadata, not editable composer content.
+        rail_rows.pop();
+
+        let mut draft = rail_rows
+            .into_iter()
+            .map(|(row, rail_cell)| visible_composer_text(row, rail_cell + 1, false))
+            .collect::<Vec<_>>()
+            .join("\n");
+        draft = draft.trim().to_owned();
+        let normalized = draft.split_whitespace().collect::<Vec<_>>().join(" ");
+        let placeholder = [
+            "Ask anything…",
+            "Ask anything...",
+            "Run a command…",
+            "Run a command...",
+        ]
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix));
+        return Some(ComposerDraft {
+            state: if draft.is_empty() || placeholder {
+                ComposerDraftState::Empty
+            } else {
+                ComposerDraftState::NonEmpty
+            },
+            draft_ends_with_backslash: draft.ends_with('\\'),
+        });
+    }
+    None
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ComposerDraft {
     state: ComposerDraftState,
@@ -1518,6 +1574,9 @@ fn composer_draft_state(rows: &[crate::terminal::RenderedRow]) -> ComposerDraftS
 }
 
 fn composer_draft(rows: &[crate::terminal::RenderedRow]) -> ComposerDraft {
+    if let Some(draft) = opencode_composer_draft(rows) {
+        return draft;
+    }
     for (index, row) in rows.iter().enumerate().rev() {
         let Some((marker_cell, marker)) = row
             .cells
@@ -3024,6 +3083,58 @@ mod tests {
             attention.mark_exited();
             task.join().unwrap();
         }
+    }
+
+    #[test]
+    fn opencode_fixture_composers_distinguish_empty_draft_and_busy_draft() {
+        const RESTING: &str = include_str!("../tests/fixtures/attention/opencode_resting.txt");
+        const DRAFT: &str = include_str!("../tests/fixtures/attention/opencode_draft.txt");
+        const WORKING: &str = include_str!("../tests/fixtures/attention/opencode_working.txt");
+
+        let state = |rendered: &str| {
+            let terminal = TerminalOutput::new(35, 180, 100);
+            terminal.feed_with_replies(format!("\x1b[2J\x1b[H{rendered}").as_bytes());
+            composer_draft_state(&terminal.read_viewport().rows)
+        };
+
+        assert_eq!(state(RESTING), ComposerDraftState::Empty);
+        assert_eq!(state(DRAFT), ComposerDraftState::NonEmpty);
+        assert_eq!(state(WORKING), ComposerDraftState::Empty);
+        assert_eq!(
+            state(&RESTING.replacen("Ask anything…", "Run a command…", 1)),
+            ComposerDraftState::Empty
+        );
+
+        let working_draft = WORKING.replacen(
+            "  ┃\n  ┃\n  ┃  Build auto",
+            "  ┃\n  ┃  draft typed while the agent works\n  ┃  Build auto",
+            1,
+        );
+        assert_ne!(working_draft, WORKING, "working fixture shape changed");
+        assert_eq!(state(&working_draft), ComposerDraftState::NonEmpty);
+
+        fn guard_holds(rendered: &str) -> bool {
+            let terminal = TerminalOutput::new(35, 180, 100);
+            let attention = AttentionTracker::new(Some("opencode".into()));
+            let (input, writes, task, _) =
+                submission_fixture_for(terminal.clone(), attention.clone());
+            input.set_typing_idle_delay(Duration::ZERO);
+            input.write_user_input(b"x").unwrap();
+            writes.recv().unwrap();
+            terminal.feed_with_replies(format!("\x1b[2J\x1b[H{rendered}").as_bytes());
+            *input.typing_activity.last_input.lock().unwrap() =
+                Some(Instant::now() - Duration::from_secs(1));
+            let held = input.has_unsent_human_draft();
+            drop(input);
+            attention.mark_exited();
+            task.join().unwrap();
+            held
+        }
+
+        assert!(!guard_holds(RESTING));
+        assert!(guard_holds(DRAFT));
+        assert!(!guard_holds(WORKING));
+        assert!(guard_holds(&working_draft));
     }
 
     #[test]

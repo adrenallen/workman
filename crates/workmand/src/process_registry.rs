@@ -2946,9 +2946,15 @@ fn is_dialog_question_row(line: &str) -> bool {
 
 fn is_dialog_choice_row(line: &str) -> bool {
     let line = line
-        .trim_start_matches(['›', '❯', '>', '*', '•', '○', '●', '◉', '◯', '☐', '☑'])
+        .trim_start_matches(['┃', '›', '❯', '>', '*', '•', '○', '●', '◉', '◯', '☐', '☑'])
         .trim_start();
     if line.starts_with("[ ]") || line.starts_with("[x]") || line.starts_with("[X]") {
+        return true;
+    }
+    let lowercase = line.to_lowercase();
+    if lowercase.contains("allow once")
+        && (lowercase.contains("allow always") || lowercase.contains("reject"))
+    {
         return true;
     }
     let Some((number, choice)) = line.split_once('.').or_else(|| line.split_once(')')) else {
@@ -3897,6 +3903,25 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn opencode_dialog_regions_exclude_transcript_and_control_hints() {
+        let question = normalized_dialog_region(include_str!(
+            "../../workman-core/tests/fixtures/attention/opencode_question_dialog.txt"
+        ));
+        assert!(question.starts_with("┃ Which color do you prefer: red or blue?"));
+        assert!(question.ends_with("┃ 3. Type your own answer"));
+        assert!(!question.contains("Asked 1 question"));
+        assert!(!question.contains("esc dismiss"));
+
+        let permission = normalized_dialog_region(include_str!(
+            "../../workman-core/tests/fixtures/attention/opencode_permission_dialog.txt"
+        ));
+        assert!(permission.starts_with("┃ △ Permission required"));
+        assert!(permission.contains("printf ok > permission-dialog.txt"));
+        assert!(permission.ends_with("enter confirm"));
+        assert!(!permission.contains("Thought:"));
     }
 
     #[test]
