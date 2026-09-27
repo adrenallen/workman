@@ -210,12 +210,27 @@ async fn profiles_filter_every_client_handshake_and_keep_user_surface_full()
     let core_tools = core_client.list_all_tools().await?;
     let core_bytes = serde_json::to_vec(&json!({ "tools": &core_tools }))?.len();
     eprintln!("Core tools/list compact JSON bytes: {core_bytes}");
-    // 21,057 bytes at introduction, with roughly ten percent growth headroom.
+    // 21,309 bytes after the todo 632 review-fix merge, retaining about 8.9% headroom.
     const CORE_TOOLS_LIST_BUDGET_BYTES: usize = 23_200;
     assert!(
         core_bytes <= CORE_TOOLS_LIST_BUDGET_BYTES,
         "Core tools/list grew beyond its size budget: {core_bytes} bytes"
     );
+    let core_help = core_client
+        .call_tool(
+            CallToolRequestParams::new("help")
+                .with_arguments(arguments(json!({ "topic": "tools" }))),
+        )
+        .await?;
+    assert_ne!(core_help.is_error, Some(true));
+    let core_help = core_help.structured_content.expect("structured tools help");
+    let core_help = core_help["text"].as_str().expect("tools help text");
+    assert!(core_help.contains("fixed when an agent launches"));
+    assert!(core_help.contains("Core:\nwhoami —"));
+    assert!(core_help.contains("Extended (requires the Extended profile):"));
+    assert!(core_help.contains("spawn_terminal —"));
+    assert!(!core_help.contains("User-only:"));
+    assert!(!core_help.contains("agent_tool_configure —"));
     let denied = core_client
         .call_tool(
             CallToolRequestParams::new("spawn_terminal").with_arguments(arguments(json!({}))),
@@ -262,6 +277,18 @@ async fn profiles_filter_every_client_handshake_and_keep_user_surface_full()
         CORE_TOOLS.len() + EXTENDED_TOOLS.len() + 1
     );
     assert!(user_tools.iter().any(|name| name == "agent_tool_configure"));
+    let user_help = user_client
+        .call_tool(
+            CallToolRequestParams::new("help")
+                .with_arguments(arguments(json!({ "topic": "tools" }))),
+        )
+        .await?;
+    assert_ne!(user_help.is_error, Some(true));
+    let user_help = user_help.structured_content.expect("structured tools help");
+    let user_help = user_help["text"].as_str().expect("tools help text");
+    assert!(user_help.contains("Core:\nwhoami —"));
+    assert!(user_help.contains("Extended (requires the Extended profile):"));
+    assert!(user_help.contains("User-only:\nagent_tool_configure —"));
     let _ = user_client.cancel().await;
 
     {

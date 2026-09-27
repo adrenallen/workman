@@ -490,9 +490,7 @@ impl WorkmanMcp {
         &self,
         context: &RequestContext<RoleServer>,
     ) -> Option<McpToolsProfile> {
-        let Some(parts) = context.extensions.get::<Parts>() else {
-            return None;
-        };
+        let parts = context.extensions.get::<Parts>()?;
         self.parts_mcp_tools_profile(parts).await
     }
 
@@ -503,9 +501,7 @@ impl WorkmanMcp {
             .or_else(|| parts.headers.get(header::AUTHORIZATION))
             .and_then(|value| value.to_str().ok())
             .map(|value| value.strip_prefix("Bearer ").unwrap_or(value));
-        let Some(token) = token else {
-            return None;
-        };
+        let token = token?;
         self.registry
             .lock()
             .await

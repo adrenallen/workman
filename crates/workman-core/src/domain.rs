@@ -56,12 +56,12 @@ macro_rules! string_enum {
     (
         $(#[$meta:meta])*
         pub enum $name:ident {
-            $($variant:ident => $value:literal),+ $(,)?
+            $($(#[$variant_meta:meta])* $variant:ident => $value:literal),+ $(,)?
         }
     ) => {
         $(#[$meta])*
         pub enum $name {
-            $($variant),+
+            $($(#[$variant_meta])* $variant),+
         }
 
         impl $name {
@@ -107,17 +107,12 @@ macro_rules! string_enum {
 }
 
 string_enum! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum McpToolsProfile {
+        #[default]
         Core => "core",
         Extended => "extended",
-    }
-}
-
-impl Default for McpToolsProfile {
-    fn default() -> Self {
-        Self::Core
     }
 }
 

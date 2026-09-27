@@ -303,7 +303,7 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     let tools = process_client.list_all_tools().await?;
     let tools_list_bytes = serde_json::to_vec(&json!({ "tools": &tools }))?.len();
     eprintln!("tools/list compact JSON bytes: {tools_list_bytes}");
-    // 26,480 bytes at introduction, with roughly ten percent growth headroom.
+    // 27,238 bytes after profile and wiring metadata, retaining the original cap.
     const TOOLS_LIST_BUDGET_BYTES: usize = 29_200;
     assert!(
         tools_list_bytes <= TOOLS_LIST_BUDGET_BYTES,

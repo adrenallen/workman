@@ -439,11 +439,13 @@ fn save_agent_tool_from_settings_at(
         &command,
         &tool_type,
         enabled,
-        resume_args,
-        continue_args,
-        existing
-            .as_ref()
-            .map_or(McpToolsProfile::Core, |tool| tool.mcp_tools_profile),
+        AgentToolEntryOptions {
+            resume_args,
+            continue_args,
+            mcp_tools_profile: existing
+                .as_ref()
+                .map_or(McpToolsProfile::Core, |tool| tool.mcp_tools_profile),
+        },
     )?;
 
     let config = validated_document(&root)?;
@@ -621,9 +623,11 @@ fn reorder_agent_tools_from_settings_at(
             &tool.command,
             &tool.tool_type,
             tool.enabled,
-            tool.resume_args.as_deref(),
-            tool.continue_args.as_deref(),
-            tool.mcp_tools_profile,
+            AgentToolEntryOptions {
+                resume_args: tool.resume_args.as_deref(),
+                continue_args: tool.continue_args.as_deref(),
+                mcp_tools_profile: tool.mcp_tools_profile,
+            },
         )?;
         entries.push(entry);
     }
@@ -690,15 +694,20 @@ fn entry_name(entry: &serde_yaml::Value) -> Option<&str> {
 }
 
 #[cfg(test)]
+struct AgentToolEntryOptions<'a> {
+    resume_args: Option<&'a str>,
+    continue_args: Option<&'a str>,
+    mcp_tools_profile: McpToolsProfile,
+}
+
+#[cfg(test)]
 fn set_agent_tool_entry(
     entry: &mut serde_yaml::Value,
     name: &str,
     command: &str,
     tool_type: &str,
     enabled: bool,
-    resume_args: Option<&str>,
-    continue_args: Option<&str>,
-    mcp_tools_profile: McpToolsProfile,
+    options: AgentToolEntryOptions<'_>,
 ) -> Result<(), UserConfigError> {
     let entry = entry.as_mapping_mut().ok_or_else(|| {
         UserConfigError::Invalid("each agent_tools entry must be a mapping".to_owned())
@@ -712,17 +721,17 @@ fn set_agent_tool_entry(
         entry.insert(serde_yaml::Value::String(key.to_owned()), value);
     }
     let profile_key = serde_yaml::Value::String("mcp_tools_profile".to_owned());
-    if mcp_tools_profile == McpToolsProfile::Extended {
+    if options.mcp_tools_profile == McpToolsProfile::Extended {
         entry.insert(
             profile_key,
-            serde_yaml::Value::String(mcp_tools_profile.as_str().to_owned()),
+            serde_yaml::Value::String(options.mcp_tools_profile.as_str().to_owned()),
         );
     } else {
         entry.remove(&profile_key);
     }
     for (key, value) in [
-        ("resume_args", resume_args),
-        ("continue_args", continue_args),
+        ("resume_args", options.resume_args),
+        ("continue_args", options.continue_args),
     ] {
         let key = serde_yaml::Value::String(key.to_owned());
         if let Some(value) = value {
