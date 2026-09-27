@@ -2063,6 +2063,29 @@ impl ProcessRegistry {
         Ok(pending_dialog(&rendered, status.classification.as_deref()))
     }
 
+    /// Return a recognized dialog reduced to its visible question/choice region.
+    ///
+    /// This intentionally excludes retained scrollback and unrelated viewport rows so callers
+    /// can build stable episode identities without copying or hashing the full terminal buffer.
+    pub(crate) fn pending_dialog_viewport(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<Option<PendingDialog>> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        let Some(output) = self.outputs.get(&process_id) else {
+            return Ok(None);
+        };
+        let rendered = output.terminal.read_viewport().text();
+        let status = output.attention.snapshot();
+        Ok(
+            pending_dialog(&rendered, status.classification.as_deref()).map(|mut dialog| {
+                dialog.rendered = normalized_dialog_region(&rendered);
+                dialog
+            }),
+        )
+    }
+
     /// Acknowledge a narrowly known first-run trust dialog with Enter.
     pub fn acknowledge_known_dialog(
         &mut self,
@@ -2787,6 +2810,94 @@ impl ProcessRegistry {
     }
 }
 
+fn normalized_dialog_region(rendered: &str) -> String {
+    let lines = rendered
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>();
+    let nonempty = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.is_empty())
+        .collect::<Vec<_>>();
+    let choices = nonempty
+        .iter()
+        .filter(|(_, line)| is_dialog_choice_row(line))
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    if nonempty.is_empty() {
+        return String::new();
+    }
+
+    let (start, end) = if let (Some(first_choice), Some(last_choice)) =
+        (choices.first().copied(), choices.last().copied())
+    {
+        let start = nonempty
+            .iter()
+            .rev()
+            .find(|(index, line)| {
+                *index < first_choice
+                    && first_choice.saturating_sub(*index) <= 10
+                    && is_dialog_question_row(line)
+            })
+            .map_or(first_choice, |(index, _)| *index);
+        (start, last_choice)
+    } else if let Some((anchor, _)) = nonempty
+        .iter()
+        .rev()
+        .find(|(_, line)| is_dialog_question_row(line))
+    {
+        (*anchor, *anchor)
+    } else {
+        let start = nonempty
+            .get(nonempty.len().saturating_sub(8))
+            .map_or(0, |(index, _)| *index);
+        let end = nonempty.last().map_or(start, |(index, _)| *index);
+        (start, end)
+    };
+
+    lines[start..=end]
+        .iter()
+        .filter(|line| !line.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_dialog_question_row(line: &str) -> bool {
+    let lowercase = line.to_lowercase();
+    line.ends_with('?')
+        || [
+            "permission required",
+            "authentication required",
+            "type your own answer",
+            "do you want to proceed",
+            "allow this command",
+            "allow this tool",
+            "approve this action",
+            "would you like to run",
+            "do you trust",
+            "press enter to continue",
+        ]
+        .iter()
+        .any(|pattern| lowercase.contains(pattern))
+}
+
+fn is_dialog_choice_row(line: &str) -> bool {
+    let line = line
+        .trim_start_matches(['›', '❯', '>', '*', '•', '○', '●', '◉', '◯', '☐', '☑'])
+        .trim_start();
+    if line.starts_with("[ ]") || line.starts_with("[x]") || line.starts_with("[X]") {
+        return true;
+    }
+    let Some((number, choice)) = line.split_once('.').or_else(|| line.split_once(')')) else {
+        return false;
+    };
+    !number.is_empty()
+        && number.chars().all(|character| character.is_ascii_digit())
+        && !choice.trim().is_empty()
+}
+
 pub(crate) struct StagedAgentAttachments {
     root: PathBuf,
     directory: Option<PathBuf>,
@@ -3380,6 +3491,18 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn dialog_region_ignores_unrelated_viewport_rows_and_normalizes_whitespace() {
+        let first = normalized_dialog_region(
+            "status: 1\nlog output\nDo you want to proceed?\n❯ 1.   Yes, allow\n  2. No",
+        );
+        let repainted = normalized_dialog_region(
+            "status: 2\ndifferent background output\nDo you want to proceed?\n❯ 1. Yes, allow\n  2. No",
+        );
+        assert_eq!(first, repainted);
+        assert_eq!(first, "Do you want to proceed?\n❯ 1. Yes, allow\n2. No");
+    }
 
     fn output_test_process(project_path: &str) -> Process {
         Process {

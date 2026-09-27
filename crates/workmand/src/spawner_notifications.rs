@@ -6,6 +6,7 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
     time::Duration,
 };
 
@@ -17,7 +18,7 @@ use tokio::{
 use workman_core::{
     Process, ProcessId, ProcessKind, ProcessStatus, ProjectId, SpawnerIdleNotificationSetting,
     SpawnerReportedState,
-    attention::{AgentState, AttentionState},
+    attention::{AgentState, AttentionState, tool_detects_busy},
 };
 
 use crate::{
@@ -78,7 +79,7 @@ struct PendingChildNotification {
     reason: ChildNotificationReason,
     completion: Option<Completion>,
     completion_input_at: Option<i64>,
-    dialog_identity: Option<String>,
+    dialog_identity: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +88,12 @@ struct ObservationKey {
     last_input_at: Option<i64>,
     work_evidence_at: Option<i64>,
     pending_prompt: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DialogIdentityCache {
+    last_content_change_at: Option<i64>,
+    identity: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +118,8 @@ pub(crate) struct SpawnerNotificationService {
     observations: BTreeMap<ProcessId, ObservationKey>,
     needs_input_clear_since: BTreeMap<ProcessId, i64>,
     reported_attention: BTreeMap<ProcessId, SpawnerReportedState>,
-    reported_dialog_identity: BTreeMap<ProcessId, String>,
+    reported_dialog_identity: BTreeMap<ProcessId, u64>,
+    dialog_identity_cache: BTreeMap<ProcessId, DialogIdentityCache>,
     suppressed_completion_ids: BTreeMap<(ProcessId, ProcessId), i64>,
     reported_finished_inputs: BTreeMap<(ProcessId, ProcessId), i64>,
     draft_holds: BTreeMap<ProcessId, DraftHold>,
@@ -147,6 +155,8 @@ impl SpawnerNotificationService {
         self.reported_attention
             .retain(|child_id, _| enabled.contains(child_id));
         self.reported_dialog_identity
+            .retain(|child_id, _| enabled.contains(child_id));
+        self.dialog_identity_cache
             .retain(|child_id, _| enabled.contains(child_id));
         let mut eligible_children =
             BTreeMap::<ProcessId, BTreeMap<ProcessId, EligibleChild>>::new();
@@ -340,10 +350,7 @@ impl SpawnerNotificationService {
             },
         );
         let dialog_identity = if observed_state == AttentionState::NeedsInput {
-            registry
-                .pending_dialog(child.id)?
-                .map(|dialog| format!("{}\n{}", dialog.classification, dialog.rendered))
-                .or_else(|| attention.classification.clone())
+            self.dialog_identity(registry, child.id, &attention)?
         } else {
             None
         };
@@ -358,12 +365,46 @@ impl SpawnerNotificationService {
         Ok(())
     }
 
+    fn dialog_identity(
+        &mut self,
+        registry: &mut ProcessRegistry,
+        child_id: ProcessId,
+        attention: &AgentState,
+    ) -> RegistryResult<Option<u64>> {
+        let last_content_change_at = attention.last_content_change_at;
+        if let Some(cached) = self.dialog_identity_cache.get(&child_id)
+            && cached.last_content_change_at == last_content_change_at
+        {
+            return Ok(cached.identity);
+        }
+
+        let mut hasher = DefaultHasher::new();
+        let identity = if let Some(dialog) = registry.pending_dialog_viewport(child_id)? {
+            dialog.classification.hash(&mut hasher);
+            dialog.rendered.hash(&mut hasher);
+            Some(hasher.finish())
+        } else {
+            attention.classification.as_ref().map(|classification| {
+                classification.hash(&mut hasher);
+                hasher.finish()
+            })
+        };
+        self.dialog_identity_cache.insert(
+            child_id,
+            DialogIdentityCache {
+                last_content_change_at,
+                identity,
+            },
+        );
+        Ok(identity)
+    }
+
     fn observe_attention_reason(
         &mut self,
         registry: &ProcessRegistry,
         spawner_id: ProcessId,
         child: &Process,
-        observation: Option<(ChildNotificationReason, Option<String>)>,
+        observation: Option<(ChildNotificationReason, Option<u64>)>,
         effective_reported: SpawnerReportedState,
         now_ms: i64,
     ) {
@@ -451,8 +492,12 @@ impl SpawnerNotificationService {
                 .get(&(spawner_id, completion.process_id))
                 .copied()
                 .or(child.setting.last_finished_input_at);
-            if last_finished_input.is_some_and(|reported| input_at <= reported) {
-                continue;
+            if let Some(reported) = last_finished_input {
+                let same_input_without_new_busy_episode = input_at == reported
+                    && !tool_detects_busy(child.attention.tool_type.as_deref());
+                if input_at < reported || same_input_without_new_busy_episode {
+                    continue;
+                }
             }
             if child.explicit_idle_timer {
                 continue;
@@ -563,7 +608,7 @@ impl SpawnerNotificationService {
         spawner_id: ProcessId,
         child: &Process,
         reason: ChildNotificationReason,
-        dialog_identity: Option<String>,
+        dialog_identity: Option<u64>,
     ) {
         self.pending
             .entry(spawner_id)
@@ -573,7 +618,7 @@ impl SpawnerNotificationService {
                 pending.child_name = single_line_name(&child.name);
                 pending.child_project_id = child.project_id;
                 pending.reason = reason;
-                pending.dialog_identity = dialog_identity.clone();
+                pending.dialog_identity = dialog_identity;
             })
             .or_insert_with(|| PendingChildNotification {
                 child_process_id: child.id,
@@ -933,6 +978,7 @@ impl SpawnerNotificationService {
         self.needs_input_clear_since.remove(&child_id);
         self.reported_attention.remove(&child_id);
         self.reported_dialog_identity.remove(&child_id);
+        self.dialog_identity_cache.remove(&child_id);
         self.suppressed_completion_ids
             .retain(|(_, candidate), _| *candidate != child_id);
         self.reported_finished_inputs
@@ -1225,6 +1271,18 @@ mod tests {
                 continue_args: None,
             })
             .unwrap();
+        store
+            .put_agent_tool(&AgentTool {
+                id: 91,
+                name: "Generic test agent".into(),
+                command: "generic-test-agent".into(),
+                tool_type: "generic_test_agent".into(),
+                enabled: true,
+                source: AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
+            })
+            .unwrap();
         ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(50)).unwrap()
     }
 
@@ -1487,13 +1545,13 @@ mod tests {
                 "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n❯\\n' \"$line\"; done",
             ))
             .unwrap();
-        registry
-            .create(process(
-                2,
-                "generic-child",
-                "printf '❯\\n'; while IFS= read -r line; do :; done",
-            ))
-            .unwrap();
+        let mut generic_child = process(
+            2,
+            "generic-child",
+            "printf '❯\\n'; while IFS= read -r line; do :; done",
+        );
+        generic_child.agent_tool_id = Some(91);
+        registry.create(generic_child).unwrap();
         registry.start(1).unwrap();
         registry.start(2).unwrap();
         wait_for_state(&mut registry, 1, AttentionState::Idle);
@@ -1541,6 +1599,71 @@ mod tests {
                 .last_finished_input_at,
             Some(100)
         );
+
+        registry.stop(1).unwrap();
+        registry.stop(2).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn busy_adapter_can_report_a_later_completion_for_the_same_input() {
+        let mut registry = registry();
+        registry
+            .create(process(
+                1,
+                "parent",
+                "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n❯\\n' \"$line\"; done",
+            ))
+            .unwrap();
+        registry
+            .create(process(
+                2,
+                "busy-child",
+                "printf '❯\\n'; while IFS= read -r line; do :; done",
+            ))
+            .unwrap();
+        registry.start(1).unwrap();
+        registry.start(2).unwrap();
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        wait_for_state(&mut registry, 2, AttentionState::Idle);
+        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
+
+        CompletionLedger::new(registry.store())
+            .record_input(1, 2, 100)
+            .unwrap();
+        let insert_completion =
+            |registry: &ProcessRegistry, evidence_at: i64, completed_at: i64| {
+                registry
+                    .store()
+                    .connection()
+                    .execute(
+                        "INSERT INTO process_completions
+                        (process_id, input_at, work_evidence_at, completed_at)
+                     VALUES (2, 100, ?1, ?2)",
+                        (evidence_at, completed_at),
+                    )
+                    .unwrap();
+            };
+        insert_completion(&registry, 200, 300);
+        let mut service = SpawnerNotificationService::default();
+        service.tick_at(&mut registry, 400).unwrap();
+        wait_for_output(&mut registry, 1, "busy-child (2) finished");
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+
+        insert_completion(&registry, 500, 600);
+        service.tick_at(&mut registry, 700).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let output = registry.rendered_output(1).unwrap().text;
+            if output.matches("busy-child (2) finished").count() == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "second completion was hidden: {output:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
 
         registry.stop(1).unwrap();
         registry.stop(2).unwrap();
@@ -1947,6 +2070,63 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+
+        registry.stop(1).unwrap();
+        registry.stop(2).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dialog_status_repaints_for_virtual_thirty_seconds_announce_once() {
+        let mut registry = registry();
+        registry
+            .create(process(
+                1,
+                "parent",
+                "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n❯\\n' \"$line\"; done",
+            ))
+            .unwrap();
+        registry
+            .create(process(
+                2,
+                "dialog-child",
+                "printf '\\033[2J\\033[Hstatus:0\\nDo you want to proceed?\\n❯ 1. Yes, allow\\n  2. No, and tell Claude\\n'; sleep 0.3; i=0; while [ $i -lt 10 ]; do i=$((i + 1)); printf '\\033[1;1H\\033[2Kstatus:%s' \"$i\"; sleep 0.12; done; sleep 30",
+            ))
+            .unwrap();
+        registry.start(1).unwrap();
+        registry.start(2).unwrap();
+        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        wait_for_state(&mut registry, 2, AttentionState::NeedsInput);
+
+        let mut service = SpawnerNotificationService::default();
+        let base = now_millis();
+        service.tick_at(&mut registry, base).unwrap();
+        wait_for_output(&mut registry, 1, "dialog-child (2) needs input");
+
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut tick = 1;
+        loop {
+            service
+                .tick_at(&mut registry, base + i64::from(tick) * 3_000)
+                .unwrap();
+            let child_output = registry.rendered_output(2).unwrap().text;
+            if child_output.contains("status:10") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "repaint fixture stalled: {child_output:?}"
+            );
+            tick += 1;
+            thread::sleep(Duration::from_millis(20));
+        }
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        service.tick_at(&mut registry, base + 33_000).unwrap();
+        let output =
+            String::from_utf8_lossy(&registry.raw_output(1, None, 64 * 1024).unwrap().data)
+                .into_owned();
+        assert_eq!(output.matches("dialog-child (2) needs input").count(), 1);
 
         registry.stop(1).unwrap();
         registry.stop(2).unwrap();

@@ -708,6 +708,12 @@ fn adapter_for(tool_type: Option<&str>) -> Box<dyn ToolAttentionAdapter> {
     }
 }
 
+/// Whether this tool family exposes positive busy markers. Completion consumers use this to
+/// distinguish adapters that can prove a later work episode from generic prompt adapters.
+pub fn tool_detects_busy(tool_type: Option<&str>) -> bool {
+    adapter_for(tool_type).detects_busy()
+}
+
 fn normalize_tool_type(tool_type: &str) -> String {
     tool_type
         .trim()

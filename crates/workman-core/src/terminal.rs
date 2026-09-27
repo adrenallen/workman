@@ -681,7 +681,8 @@ impl TerminalOutput {
         }
     }
 
-    pub(crate) fn read_viewport(&self) -> RenderedRows {
+    /// Snapshot only the visible terminal viewport, excluding retained scrollback.
+    pub fn read_viewport(&self) -> RenderedRows {
         let terminal = self.lock();
         let viewport_start = terminal.history_rows();
         terminal.read_rows(viewport_start..usize::MAX)
