@@ -14,6 +14,15 @@ All notable changes to Workman are recorded here.
   can be undone. Preserve comment anchors across re-alignment.
 - Render tables consistently in todo bodies, comments, scratchpad views, and release notes.
 
+### Terminal and recorded feedback
+
+- Preserve alternate-screen TUI contents and terminal modes when reconnecting after retained
+  output wraps, crossing an output gap, or restarting the daemon. Replay restores the primary
+  screen underneath the TUI as well as its current alternate-screen grid.
+- Capture a feedback region without bringing Workman in front of the selected app. Safely leave
+  region selection after cancellation, lost pointer capture, capture errors, tool changes, pauses,
+  or timeouts, and return to the Pointer tool after an abort or error.
+
 ### Agent coordination
 
 - Let `timer_fire_when_idle(wait_for="any")` count an unseen completion that happened before
