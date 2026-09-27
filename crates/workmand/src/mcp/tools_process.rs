@@ -14,7 +14,9 @@ use serde_json::json;
 use workman_core::{Actor, Process, ProcessId, ProjectId};
 
 use super::{WorkmanMcp, failure, scoped_project, success};
-use crate::{ProcessRegistry, RegistryError};
+use crate::{
+    ProcessRegistry, RegistryError, completion_ledger::CompletionLedger, timers::now_millis,
+};
 
 const DEFAULT_OUTPUT_LINES: usize = 50;
 const MAX_OUTPUT_LINES: usize = 200;
@@ -519,14 +521,14 @@ impl WorkmanMcp {
             Err(error) => return failure("invalid_input", error),
         };
         let bytes_sent = input.data.len() + usize::from(input.submit);
-        let (process_id, process_name, cursor) = {
+        let (process_id, process_name, owner_process_id, cursor) = {
             let mut registry = self.registry.lock().await;
             let target = ProcessTarget {
                 process_id: args.process_id,
                 process_name: args.process_name.as_deref(),
                 project_id: args.project_id,
             };
-            let (process, _) = match resolve_process(&mut registry, &parts, target) {
+            let (process, actor) = match resolve_process(&mut registry, &parts, target) {
                 Ok(resolved) => resolved,
                 Err(error) => return target_failure(error),
             };
@@ -549,7 +551,7 @@ impl WorkmanMcp {
                 Ok(output) => output.total_bytes,
                 Err(error) => return registry_failure(error),
             };
-            (process.id, process.name, cursor)
+            (process.id, process.name, actor.process_id, cursor)
         };
         let sent = if input.submit {
             let mut registry = self.registry.lock().await;
@@ -563,6 +565,16 @@ impl WorkmanMcp {
         };
         if let Err(error) = sent {
             return registry_failure(error);
+        }
+        if let Some(owner_process_id) = owner_process_id {
+            let registry = self.registry.lock().await;
+            if let Err(error) = CompletionLedger::new(registry.store()).record_input(
+                owner_process_id,
+                process_id,
+                now_millis(),
+            ) {
+                return failure("completion_ledger_error", error.to_string());
+            }
         }
 
         let waited_ms = args.wait_ms.map(|wait| wait.clamp(250, 10_000));

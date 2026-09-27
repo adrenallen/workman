@@ -2913,7 +2913,8 @@ mod tests {
             "stty raw -echo; printf '\\033]10;?\\033\\\\\\033]11;?\\033\\\\'; dd bs=1 count={} 2>/dev/null",
             expected.len()
         );
-        let mut process = PtyProcess::spawn(PtySpawnOptions::new(88, "test-token", command)).unwrap();
+        let mut process =
+            PtyProcess::spawn(PtySpawnOptions::new(88, "test-token", command)).unwrap();
         let output = wait_for_output(&process, expected);
         assert_eq!(
             output, expected,

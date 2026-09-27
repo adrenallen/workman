@@ -3236,7 +3236,8 @@ mod tests {
                 }
                 let executable = fixture.home.path().join("long-agent");
                 std::fs::write(&executable, "#!/bin/sh\ntrap '' HUP TERM\nprintf '%s' $$ > \"$HOME/child-pid\"\nexec /bin/sleep 300\n").unwrap();
-                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
                 let store = Store::open_in_memory().unwrap();
                 store
                     .put_project(&Project {
@@ -3265,7 +3266,8 @@ mod tests {
                 registry.start(31).unwrap();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 let child_pid = loop {
-                    if let Ok(pid) = std::fs::read_to_string(fixture.home.path().join("child-pid")) {
+                    if let Ok(pid) = std::fs::read_to_string(fixture.home.path().join("child-pid"))
+                    {
                         if let Ok(pid) = pid.parse::<i32>() {
                             break pid;
                         }
