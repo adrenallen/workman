@@ -409,6 +409,14 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .contains("Template: set agent_template_id only")
     );
     assert!(
+        tools_summary["spawn_agent_guidance"]
+            .as_str()
+            .unwrap()
+            .contains(
+                "keeps the template's model only for the same agent type, carries effort between Claude and Codex"
+            )
+    );
+    assert!(
         !tools_summary["spawn_agent_guidance"]
             .as_str()
             .unwrap()
