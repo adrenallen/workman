@@ -231,10 +231,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "drop_mcp_tools_profiles",
         include_str!("../migrations/0043_drop_mcp_tools_profiles.sql"),
     ),
+    (
+        44,
+        "completion_report_time",
+        include_str!("../migrations/0044_completion_report_time.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 43;
+pub const LATEST_SCHEMA_VERSION: i64 = 44;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -2942,7 +2947,7 @@ fn drop_mcp_tools_profiles_migration_preserves_schema_42_rows() {
     }
 
     let store = Store::from_connection(connection).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 43);
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     let counts_after = ["agent_tools", "agent_templates", "processes"].map(|table| {
         store
             .connection()

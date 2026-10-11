@@ -16,7 +16,7 @@ use workman_core::{
 fn fresh_database_migrates_to_current_schema() {
     let mut store = Store::open_in_memory().expect("open store");
 
-    assert_eq!(LATEST_SCHEMA_VERSION, 43);
+    assert_eq!(LATEST_SCHEMA_VERSION, 44);
     assert_eq!(
         store.schema_version().expect("read schema version"),
         LATEST_SCHEMA_VERSION

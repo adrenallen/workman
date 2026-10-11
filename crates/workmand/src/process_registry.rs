@@ -7,7 +7,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock, mpsc},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -425,6 +425,18 @@ impl ProcessInputRouter {
         verification: Option<PtySubmissionVerification>,
         allow_dialog: bool,
     ) -> RegistryResult<Process> {
+        self.submit_input_tracked(process_id, content, key_delay, verification, allow_dialog)
+            .map(|(process, _)| process)
+    }
+
+    fn submit_input_tracked(
+        &self,
+        process_id: ProcessId,
+        content: &[u8],
+        key_delay: Duration,
+        verification: Option<PtySubmissionVerification>,
+        allow_dialog: bool,
+    ) -> RegistryResult<(Process, mpsc::Receiver<i64>)> {
         let target = self.target(process_id)?;
         let active = target
             .active
@@ -440,23 +452,15 @@ impl ProcessInputRouter {
                 mode: PtySubmissionVerificationMode::TurnStart,
             })
         });
-        let queued = if allow_dialog {
-            target
-                .input
-                .submit_dialog_response(content, key_delay, verification)
-        } else if let Some(verification) = verification {
-            target
-                .input
-                .submit_input_verified(content, key_delay, verification)
-        } else {
-            target.input.submit_input(content, key_delay)
-        };
-        queued.map_err(|error| RegistryError::Pty {
-            process_id,
-            message: error.to_string(),
-        })?;
+        let receipt = target
+            .input
+            .submit_input_tracked(content, key_delay, verification, allow_dialog)
+            .map_err(|error| RegistryError::Pty {
+                process_id,
+                message: error.to_string(),
+            })?;
         target.attention.observe_input();
-        Ok(target.process)
+        Ok((target.process, receipt))
     }
 
     fn target(&self, process_id: ProcessId) -> RegistryResult<ProcessInputTarget> {
@@ -2377,6 +2381,18 @@ impl ProcessRegistry {
         self.submit_input_with_delay(process_id, content, SUBMIT_KEY_DELAY)
     }
 
+    /// The receipt arrives only after the PTY worker writes the first Enter.
+    pub(crate) fn submit_input_tracked(
+        &mut self,
+        process_id: ProcessId,
+        content: &[u8],
+    ) -> RegistryResult<mpsc::Receiver<i64>> {
+        self.refresh_exits()?;
+        self.input_router
+            .submit_input_tracked(process_id, content, SUBMIT_KEY_DELAY, None, false)
+            .map(|(_, receipt)| receipt)
+    }
+
     /// Explicit force=true responses retain their dialog override even after a typing pause.
     pub(crate) fn submit_dialog_response(
         &mut self,
@@ -2594,7 +2610,7 @@ impl ProcessRegistry {
                 ),
                 PtySubmissionEventKind::EnterBlockedByDialog => (
                     "submit_enter_blocked_by_dialog",
-                    "Message text was written, but Enter was withheld because a dialog appeared or changed, or typing resumed during the response. Check the terminal before submitting or resending.".into(),
+                    "Message text was written, but Enter was withheld because a dialog appeared or changed, or typing resumed during the response. Automatic messages remain queued until the dialog clears and the composer is safe; explicit dialog responses need review.".into(),
                 ),
                 PtySubmissionEventKind::RetryBlockedByDialog => (
                     "submit_retry_blocked_by_dialog",
