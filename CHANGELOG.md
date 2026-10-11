@@ -7,7 +7,6 @@ All notable changes to Workman are recorded here.
 - Deliver child notifications while Claude Code is working by queuing a follow-up prompt.
   Keep permission dialogs, startup, human drafts, typing pauses, and pending prompts protected,
   and report the reason when delivery has been held for a minute.
-  Completions observed in separate ticks while Claude is busy arrive as separate queued messages.
 
 ## 0.1.18 - 2026-09-27
 

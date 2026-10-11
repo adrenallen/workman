@@ -706,8 +706,7 @@ impl PtyInputHandle {
 
     /// Queue content followed by Enter as one ordered process-local submission.
     pub fn submit_input(&self, content: &[u8], key_delay: Duration) -> io::Result<()> {
-        self.submit_input_tracked(content, key_delay, None, false)
-            .map(drop)
+        self.queue_submission(content, key_delay, None, false)
     }
 
     /// Queue a submission whose Enter is retried when no turn-start output appears.
@@ -717,8 +716,7 @@ impl PtyInputHandle {
         key_delay: Duration,
         verification: PtySubmissionVerification,
     ) -> io::Result<()> {
-        self.submit_input_tracked(content, key_delay, Some(verification), false)
-            .map(drop)
+        self.queue_submission(content, key_delay, Some(verification), false)
     }
 
     /// An explicitly requested dialog answer may pass the delivery-time dialog guard.
@@ -728,20 +726,16 @@ impl PtyInputHandle {
         key_delay: Duration,
         verification: Option<PtySubmissionVerification>,
     ) -> io::Result<()> {
-        self.submit_input_tracked(content, key_delay, verification, true)
-            .map(drop)
+        self.queue_submission(content, key_delay, verification, true)
     }
 
-    /// Queue a submission and receive the input timestamp when its first Enter is written.
-    /// A blocked submission stays pending; disconnection before a receipt means it failed.
-    pub fn submit_input_tracked(
+    fn queue_submission(
         &self,
         content: &[u8],
         key_delay: Duration,
         verification: Option<PtySubmissionVerification>,
         allow_dialog: bool,
-    ) -> io::Result<mpsc::Receiver<i64>> {
-        let (submitted, receipt) = mpsc::channel();
+    ) -> io::Result<()> {
         let queued_at = Instant::now();
         let dialog = if allow_dialog {
             current_submission_dialog(&self.attention, &self.terminal_output)
@@ -757,12 +751,9 @@ impl PtyInputHandle {
                 dialog,
                 queued_at,
                 held: !self.typing_activity.remaining().is_zero(),
-                body_written: false,
-                submitted,
                 _pending_prompt: self.attention.reserve_prompt(),
             })
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))?;
-        Ok(receipt)
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))
     }
 }
 
@@ -774,8 +765,6 @@ struct PtySubmission {
     dialog: Option<PendingDialog>,
     queued_at: Instant,
     held: bool,
-    body_written: bool,
-    submitted: mpsc::Sender<i64>,
     _pending_prompt: PendingPrompt,
 }
 
@@ -1122,8 +1111,7 @@ impl PtyProcess {
     ) -> io::Result<()> {
         self.input_handle()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))?
-            .submit_input_tracked(content, key_delay, verification, false)
-            .map(drop)
+            .queue_submission(content, key_delay, verification, false)
     }
 
     /// Drain retry/failure notices produced since the previous read.
@@ -1335,9 +1323,6 @@ fn process_submissions(
             force_enter: false,
             force_enter_interrupted: false,
             last_write_at: submission.queued_at,
-            retained_body: submission
-                .body_written
-                .then_some(submission.content.as_slice()),
         };
         let content =
             framed_submission_content(&submission.content, terminal_output.is_bracketed_paste());
@@ -1357,8 +1342,6 @@ fn process_submissions(
             }
             Err(_) => break,
         };
-        gate.retained_body = None;
-        submission.body_written = true;
         queue_was_held |= gate.held;
         waiting_for_dialog = false;
         thread::sleep(submission.key_delay);
@@ -1387,12 +1370,6 @@ fn process_submissions(
                             PtySubmissionEventKind::RetryBlockedByDialog
                         },
                     );
-                    if attempt == 1 && !submission.allow_dialog {
-                        submission.held = gate.held;
-                        pending.push_front(submission);
-                        waiting_for_dialog = true;
-                        thread::sleep(Duration::from_millis(25));
-                    }
                     continue 'submissions;
                 }
                 Err(_) => return,
@@ -1404,9 +1381,6 @@ fn process_submissions(
                 // prompt. Verification retries are the same logical submission and must
                 // not move its baseline or discard work evidence already observed for it.
                 attention.observe_input();
-                if let Some(input_at) = attention.snapshot().last_input_at {
-                    let _ = submission.submitted.send(input_at);
-                }
             }
             let Some(verification) = submission.verification else {
                 break;
@@ -1584,15 +1558,13 @@ fn opencode_composer_draft(rows: &[crate::terminal::RenderedRow]) -> Option<Comp
                 ComposerDraftState::NonEmpty
             },
             draft_ends_with_backslash: draft.ends_with('\\'),
-            text: draft.to_owned(),
         });
     }
     None
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ComposerDraft {
-    text: String,
     state: ComposerDraftState,
     draft_ends_with_backslash: bool,
 }
@@ -1622,7 +1594,6 @@ fn composer_draft(rows: &[crate::terminal::RenderedRow]) -> ComposerDraft {
             return ComposerDraft {
                 state: ComposerDraftState::Unknown,
                 draft_ends_with_backslash: false,
-                text: String::new(),
             };
         }
         let mut wrapped = row.wrapped;
@@ -1642,13 +1613,11 @@ fn composer_draft(rows: &[crate::terminal::RenderedRow]) -> ComposerDraft {
         return ComposerDraft {
             state,
             draft_ends_with_backslash: draft.ends_with('\\'),
-            text: draft.to_owned(),
         };
     }
     ComposerDraft {
         state: ComposerDraftState::Unknown,
         draft_ends_with_backslash: false,
-        text: String::new(),
     }
 }
 
@@ -1676,7 +1645,6 @@ struct SubmissionGate<'a> {
     force_enter: bool,
     force_enter_interrupted: bool,
     last_write_at: Instant,
-    retained_body: Option<&'a [u8]>,
 }
 
 impl SubmissionGate<'_> {
@@ -1698,7 +1666,7 @@ impl SubmissionGate<'_> {
         // leave Enter to the user instead of accepting an unknown replacement prompt.
     }
 
-    /// None retains an automatic submission or suppresses a stale explicit dialog answer.
+    /// None leaves a normal body queued, or suppresses an unsafe Enter/stale dialog answer.
     fn write(
         &mut self,
         writer: &Arc<Mutex<Box<dyn Write + Send>>>,
@@ -1721,35 +1689,17 @@ impl SubmissionGate<'_> {
                 self.typing_activity.active_since(self.queued_at)
             };
             if remaining.is_zero() {
-                // Automated bodies and every Enter must inspect the current viewport,
-                // even when no human typing pause preceded the submission.
-                if !self.allow_dialog || self.held {
+                if self.held {
                     let current = current_submission_dialog(self.attention, self.terminal_output);
-                    let blocked = if self.allow_dialog {
-                        self.force_enter_interrupted || current != self.dialog
-                    } else {
-                        current.is_some()
-                    };
-                    if blocked {
+                    if self.allow_dialog {
+                        if self.force_enter_interrupted || current != self.dialog {
+                            return Ok(None);
+                        }
+                    } else if current.is_some() {
                         return Ok(None);
                     }
                 }
                 let output_before_write = self.raw_output.total_bytes_seen();
-                if let Some(body) = self.retained_body {
-                    // Do not send a clearing key into a dialog or erase a human's edits.
-                    // Keep the interrupted body at the FIFO head. Resume Enter only for
-                    // our exact draft; re-paste only into a positively empty composer.
-                    // Unknown/edited drafts remain held for the user to clear.
-                    let draft = composer_draft(&self.terminal_output.read_viewport().rows);
-                    if draft.state == ComposerDraftState::NonEmpty
-                        && draft.text == String::from_utf8_lossy(body).trim()
-                    {
-                        return Ok(Some(output_before_write));
-                    }
-                    if draft.state != ComposerDraftState::Empty {
-                        return Ok(None);
-                    }
-                }
                 writer.write_all(bytes)?;
                 writer.flush()?;
                 self.last_write_at = Instant::now();
@@ -3297,94 +3247,6 @@ mod tests {
                     break;
                 }
             }
-            input.attention.mark_exited();
-            drop(input);
-            task.join().unwrap();
-            assert!(writes.try_recv().is_err());
-        }
-    }
-
-    #[test]
-    fn automatic_submission_checks_dialog_before_body_without_typing() {
-        let terminal = TerminalOutput::new(24, 80, 100);
-        let attention = AttentionTracker::new(Some("claude_code".into()));
-        terminal
-            .feed_with_replies(b"Do you want to proceed?\r\n1. Yes\r\n2. No\r\nEnter to confirm");
-        let (input, writes, task, _) = submission_fixture_for(terminal.clone(), attention);
-        let receipt = input
-            .submit_input_tracked(b"wake", Duration::ZERO, None, false)
-            .unwrap();
-        assert!(writes.recv_timeout(Duration::from_millis(150)).is_err());
-        assert!(matches!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty)));
-        terminal.feed_with_replies("\x1b[2J\x1b[H❯ ".as_bytes());
-        assert_eq!(
-            writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
-            b"wake"
-        );
-        assert_eq!(
-            writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
-            b"\r"
-        );
-        receipt.recv_timeout(Duration::from_secs(2)).unwrap();
-        drop(input);
-        task.join().unwrap();
-    }
-
-    #[test]
-    fn automatic_enter_block_retains_body_and_receipt_until_safe_without_typing() {
-        for restore_body in [false, true] {
-            let terminal = TerminalOutput::new(24, 80, 100);
-            let attention = AttentionTracker::new(Some("claude_code".into()));
-            let (input, writes, task, events) = submission_fixture_for(terminal.clone(), attention);
-            let receipt = input
-                .submit_input_tracked(b"wake", Duration::from_millis(150), None, false)
-                .unwrap();
-            input.submit_input(b"second", Duration::ZERO).unwrap();
-            assert_eq!(
-                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
-                b"wake"
-            );
-            terminal.feed_with_replies(
-                b"Do you want to proceed?\r\n1. Yes\r\n2. No\r\nEnter to confirm",
-            );
-            assert_eq!(
-                events.recv_timeout(Duration::from_secs(2)).unwrap().kind,
-                PtySubmissionEventKind::EnterBlockedByDialog
-            );
-            assert!(writes.recv_timeout(Duration::from_millis(150)).is_err());
-            assert!(matches!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty)));
-            // A changed or unrecognized composer cannot be overwritten or merged with.
-            for viewport in ["unknown composer", "❯ human edited the draft"] {
-                terminal.feed_with_replies(format!("\x1b[2J\x1b[H{viewport}").as_bytes());
-                assert!(writes.recv_timeout(Duration::from_millis(150)).is_err());
-            }
-            terminal.feed_with_replies(
-                if restore_body {
-                    "\x1b[2J\x1b[H❯ wake"
-                } else {
-                    "\x1b[2J\x1b[H❯ "
-                }
-                .as_bytes(),
-            );
-            if !restore_body {
-                assert_eq!(
-                    writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
-                    b"wake"
-                );
-            }
-            assert_eq!(
-                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
-                b"\r"
-            );
-            receipt.recv_timeout(Duration::from_secs(2)).unwrap();
-            assert_eq!(
-                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
-                b"second"
-            );
-            assert_eq!(
-                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
-                b"\r"
-            );
             drop(input);
             task.join().unwrap();
             assert!(writes.try_recv().is_err());

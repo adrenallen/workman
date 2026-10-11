@@ -185,40 +185,6 @@ impl<'a> CompletionLedger<'a> {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Newest reported completion still queued in the owner's current turn.
-    /// A later owner input or re-prompt of the child invalidates this evidence.
-    pub(crate) fn completions_reported_since(
-        &self,
-        owner_process_id: ProcessId,
-        process_ids: &[ProcessId],
-        owner_input_at: i64,
-    ) -> CompletionLedgerResult<Vec<Completion>> {
-        let mut statement = self.store.connection().prepare(
-            "SELECT completion.id, completion.process_id, completion.completed_at
-             FROM process_completion_reports AS report
-             JOIN process_completions AS completion ON completion.id = report.completion_id
-             JOIN process_completion_inputs AS input
-               ON input.owner_process_id = report.owner_process_id
-              AND input.process_id = report.process_id
-             WHERE report.owner_process_id = ?1
-               AND report.reported_at >= ?2
-               AND completion.completed_at > input.last_input_at
-               AND completion.id = (SELECT MAX(id) FROM process_completions
-                                     WHERE process_id = report.process_id)",
-        )?;
-        // Input and submission receipts use millisecond timestamps: equality includes
-        // the Enter that queued this completion without resurrecting legacy NULL reports.
-        let rows = statement.query_map(
-            params![owner_process_id, owner_input_at],
-            completion_from_row,
-        )?;
-        Ok(rows
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .filter(|completion| process_ids.contains(&completion.process_id))
-            .collect())
-    }
-
     pub(crate) fn latest_completion(
         &self,
         process_id: ProcessId,
@@ -253,27 +219,11 @@ impl<'a> CompletionLedger<'a> {
     }
 
     /// Mark one completion (and all older ones for that process) as reported to an owner.
-    #[cfg(test)]
     pub(crate) fn mark_completion_reported(
         &self,
         owner_process_id: ProcessId,
         process_id: ProcessId,
         completion_id: i64,
-    ) -> CompletionLedgerResult<bool> {
-        self.mark_completion_reported_at(
-            owner_process_id,
-            process_id,
-            completion_id,
-            crate::timers::now_millis(),
-        )
-    }
-
-    fn mark_completion_reported_at(
-        &self,
-        owner_process_id: ProcessId,
-        process_id: ProcessId,
-        completion_id: i64,
-        reported_at: i64,
     ) -> CompletionLedgerResult<bool> {
         let belongs_to_process = self.store.connection().query_row(
             "SELECT EXISTS(
@@ -290,13 +240,12 @@ impl<'a> CompletionLedger<'a> {
         }
         let changed = self.store.connection().execute(
             "INSERT INTO process_completion_reports
-                (owner_process_id, process_id, completion_id, reported_at)
-             VALUES (?1, ?2, ?3, ?4)
+                (owner_process_id, process_id, completion_id)
+             VALUES (?1, ?2, ?3)
              ON CONFLICT(owner_process_id, process_id) DO UPDATE SET
-                completion_id = excluded.completion_id,
-                reported_at = excluded.reported_at
+                completion_id = excluded.completion_id
              WHERE excluded.completion_id > process_completion_reports.completion_id",
-            params![owner_process_id, process_id, completion_id, reported_at],
+            params![owner_process_id, process_id, completion_id],
         )?;
         Ok(changed > 0)
     }
@@ -305,19 +254,6 @@ impl<'a> CompletionLedger<'a> {
         &self,
         owner_process_id: ProcessId,
         completions: impl IntoIterator<Item = Completion>,
-    ) -> CompletionLedgerResult<()> {
-        self.mark_completions_reported_at(
-            owner_process_id,
-            completions,
-            crate::timers::now_millis(),
-        )
-    }
-
-    pub(crate) fn mark_completions_reported_at(
-        &self,
-        owner_process_id: ProcessId,
-        completions: impl IntoIterator<Item = Completion>,
-        reported_at: i64,
     ) -> CompletionLedgerResult<()> {
         let newest_by_process = completions.into_iter().fold(
             BTreeMap::<ProcessId, Completion>::new(),
@@ -334,12 +270,7 @@ impl<'a> CompletionLedger<'a> {
             },
         );
         for completion in newest_by_process.into_values() {
-            self.mark_completion_reported_at(
-                owner_process_id,
-                completion.process_id,
-                completion.id,
-                reported_at,
-            )?;
+            self.mark_completion_reported(owner_process_id, completion.process_id, completion.id)?;
         }
         Ok(())
     }
@@ -441,77 +372,6 @@ mod tests {
                 .unwrap()
         );
         assert!(ledger.unreported_completions(2, &[3]).unwrap().is_empty());
-    }
-
-    #[test]
-    fn current_turn_reports_expire_on_owner_input_child_reprompt_or_new_completion() {
-        let store = Store::open_in_memory().unwrap();
-        put_fixture(&store);
-        let ledger = CompletionLedger::new(&store);
-        ledger.record_input(1, 3, 100).unwrap();
-        let first = ledger
-            .observe_process(3, AttentionState::Idle, Some(101), Some(105), false, 110)
-            .unwrap()
-            .unwrap();
-        ledger
-            .mark_completions_reported_at(1, [first], 200)
-            .unwrap();
-        assert_eq!(
-            ledger.completions_reported_since(1, &[3], 200).unwrap(),
-            vec![first]
-        );
-        assert!(
-            ledger
-                .completions_reported_since(2, &[3], 100)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            ledger
-                .completions_reported_since(1, &[2], 100)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            ledger
-                .completions_reported_since(1, &[3], 201)
-                .unwrap()
-                .is_empty()
-        );
-        // Idempotent reports must not refresh an old completion into a later owner turn.
-        ledger
-            .mark_completions_reported_at(1, [first], 300)
-            .unwrap();
-        assert!(
-            ledger
-                .completions_reported_since(1, &[3], 201)
-                .unwrap()
-                .is_empty()
-        );
-        let second = ledger
-            .observe_process(3, AttentionState::Idle, Some(101), Some(305), false, 310)
-            .unwrap()
-            .unwrap();
-        assert!(
-            ledger
-                .completions_reported_since(1, &[3], 100)
-                .unwrap()
-                .is_empty()
-        );
-        ledger
-            .mark_completions_reported_at(1, [second], 320)
-            .unwrap();
-        assert_eq!(
-            ledger.completions_reported_since(1, &[3], 320).unwrap(),
-            vec![second]
-        );
-        ledger.record_input(1, 3, 330).unwrap();
-        assert!(
-            ledger
-                .completions_reported_since(1, &[3], 100)
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[test]

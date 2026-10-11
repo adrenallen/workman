@@ -243,7 +243,6 @@ pub(crate) struct TimerSatisfaction {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TimerSatisfactionReason {
     UnseenCompletion,
-    AlreadyQueuedCompletion,
     FreshTransition,
     Deadline,
     Error,
@@ -404,45 +403,19 @@ impl<'a> TimerService<'a> {
             .into_iter()
             .map(|completion| (completion.process_id, completion))
             .collect::<BTreeMap<_, _>>();
-        let queued_by_process = if let Some(owner_process_id) = owner_process_id {
-            if let Some(input_at) = self
-                .registry
-                .agent_attention_snapshot(owner_process_id)?
-                .last_input_at
-            {
-                CompletionLedger::new(self.registry.store()).completions_reported_since(
-                    owner_process_id,
-                    &watch_process_ids,
-                    input_at,
-                )?
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        }
-        .into_iter()
-        .map(|completion| (completion.process_id, completion))
-        .collect::<BTreeMap<_, _>>();
         let mut watch_state = BTreeMap::new();
         let mut satisfied_by = Vec::new();
         for process_id in &watch_process_ids {
             let idle = idle_by_process[process_id];
             let unseen = idle.then(|| unseen_by_process.get(process_id)).flatten();
-            let queued = idle.then(|| queued_by_process.get(process_id)).flatten();
-            let already_satisfied =
-                kind == TimerKind::IdleAll && idle || unseen.is_some() || queued.is_some();
+            let already_satisfied = kind == TimerKind::IdleAll && idle || unseen.is_some();
             let mut progress = WatchProgress::new(idle, already_satisfied);
-            if let Some(completion) = unseen.or(queued) {
+            if let Some(completion) = unseen {
                 progress.completion_id = Some(completion.id);
                 satisfied_by.push(TimerSatisfaction {
                     process_id: Some(*process_id),
                     completed_at_ms: Some(completion.completed_at_ms),
-                    reason: if unseen.is_some() {
-                        TimerSatisfactionReason::UnseenCompletion
-                    } else {
-                        TimerSatisfactionReason::AlreadyQueuedCompletion
-                    },
+                    reason: TimerSatisfactionReason::UnseenCompletion,
                 });
             }
             watch_state.insert(*process_id, progress);
@@ -465,9 +438,10 @@ impl<'a> TimerService<'a> {
                         "idle timer immediate delivery ledger input failed for process {delivery_process_id}: {error}"
                     );
                 }
-                // Timer report bookkeeping remains enqueue-time and best-effort; the PTY
-                // worker retains blocked submissions until their dialog clears. A daemon
-                // crash in between can lose both this wake and its re-arm safety net.
+                // submit_input only guarantees that delivery is queued. There is no cheap
+                // callback from the PTY worker's eventual write, so report bookkeeping is
+                // intentionally enqueue-time and best-effort. A daemon crash in between can
+                // lose both this wake and its re-arm safety net.
                 if let Err(error) = ledger.mark_completions_reported(
                     owner_process_id,
                     unseen_by_process
@@ -944,7 +918,6 @@ impl<'a> TimerService<'a> {
                             .rev()
                             .find_map(|satisfaction| match satisfaction.reason {
                                 TimerSatisfactionReason::UnseenCompletion
-                                | TimerSatisfactionReason::AlreadyQueuedCompletion
                                 | TimerSatisfactionReason::FreshTransition => {
                                     Some(satisfaction.reason)
                                 }
