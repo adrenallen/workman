@@ -552,6 +552,7 @@ struct TypingActivity {
     unsent_human_draft: AtomicBool,
     bracketed_paste_active: AtomicBool,
     notification_held_by_draft: AtomicBool,
+    handoff_pending: AtomicBool,
 }
 
 impl TypingActivity {
@@ -627,6 +628,11 @@ impl PtyInputHandle {
         }
         writer.write_all(bytes)?;
         writer.flush()?;
+        if submits_prompt {
+            self.typing_activity
+                .handoff_pending
+                .store(false, Ordering::Release);
+        }
         Ok(submits_prompt)
     }
 
@@ -1329,32 +1335,33 @@ fn process_submissions(
             force_enter: false,
             force_enter_interrupted: false,
             last_write_at: submission.queued_at,
+            dialog_wait_started: submission.dialog_wait_started,
         };
-        let content =
-            framed_submission_content(&submission.content, terminal_output.is_bracketed_paste());
-        let output_before_content = match gate.write(&writer, &content) {
-            Ok(Some(offset)) => offset,
-            Ok(None) => {
-                if submission.allow_dialog {
-                    report_dialog_block(&events, PtySubmissionEventKind::StaleDialogResponse);
-                } else if submission
-                    .dialog_wait_started
-                    .get_or_insert_with(Instant::now)
-                    .elapsed()
-                    >= AUTOMATIC_DIALOG_WAIT
-                {
-                    report_dialog_block(&events, PtySubmissionEventKind::BodyDialogTimeout);
-                } else {
-                    submission.held = gate.held;
-                    queue_was_held |= gate.held;
-                    pending.push_front(submission);
-                    waiting_for_dialog = true;
-                    thread::sleep(Duration::from_millis(25));
+        let output_before_content =
+            match gate.write(&writer, &submission.content, SubmissionStage::Body) {
+                Ok(Some(offset)) => offset,
+                Ok(None) => {
+                    submission.dialog_wait_started = gate.dialog_wait_started;
+                    if submission.allow_dialog {
+                        report_dialog_block(&events, PtySubmissionEventKind::StaleDialogResponse);
+                    } else if submission
+                        .dialog_wait_started
+                        .get_or_insert_with(Instant::now)
+                        .elapsed()
+                        >= AUTOMATIC_DIALOG_WAIT
+                    {
+                        report_dialog_block(&events, PtySubmissionEventKind::BodyDialogTimeout);
+                    } else {
+                        submission.held = gate.held;
+                        queue_was_held |= gate.held;
+                        pending.push_front(submission);
+                        waiting_for_dialog = true;
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    continue;
                 }
-                continue;
-            }
-            Err(_) => break,
-        };
+                Err(_) => break,
+            };
         queue_was_held |= gate.held;
         waiting_for_dialog = false;
         thread::sleep(submission.key_delay);
@@ -1371,7 +1378,12 @@ fn process_submissions(
             .map(|verification| verification.max_attempts.max(1))
             .unwrap_or(1);
         for attempt in 1..=attempts {
-            let output_before_enter = match gate.write(&writer, b"\r") {
+            let stage = if attempt == 1 {
+                SubmissionStage::Enter
+            } else {
+                SubmissionStage::Retry
+            };
+            let output_before_enter = match gate.write(&writer, b"\r", stage) {
                 Ok(Some(offset)) => offset,
                 Ok(None) => {
                     queue_was_held |= gate.held;
@@ -1647,6 +1659,13 @@ fn framed_submission_content(content: &[u8], bracketed_paste: bool) -> Vec<u8> {
     framed
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum SubmissionStage {
+    Body,
+    Enter,
+    Retry,
+}
+
 struct SubmissionGate<'a> {
     typing_activity: &'a TypingActivity,
     attention: &'a AttentionTracker,
@@ -1659,6 +1678,7 @@ struct SubmissionGate<'a> {
     force_enter: bool,
     force_enter_interrupted: bool,
     last_write_at: Instant,
+    dialog_wait_started: Option<Instant>,
 }
 
 impl SubmissionGate<'_> {
@@ -1685,6 +1705,7 @@ impl SubmissionGate<'_> {
         &mut self,
         writer: &Arc<Mutex<Box<dyn Write + Send>>>,
         bytes: &[u8],
+        stage: SubmissionStage,
     ) -> io::Result<Option<u64>> {
         loop {
             if self.attention.snapshot().exited {
@@ -1702,19 +1723,51 @@ impl SubmissionGate<'_> {
             } else {
                 self.typing_activity.active_since(self.queued_at)
             };
+            let check_dialog =
+                self.held || (!self.allow_dialog && self.attention.checks_submission_dialogs());
+            let current = check_dialog
+                .then(|| current_submission_dialog(self.attention, self.terminal_output))
+                .flatten();
+            // A dialog can clear during a typing pause. A later dialog gets its own bound.
+            if stage == SubmissionStage::Body && current.is_none() {
+                self.dialog_wait_started = None;
+            }
             if remaining.is_zero() {
-                if !self.allow_dialog || self.held {
-                    let current = current_submission_dialog(self.attention, self.terminal_output);
+                if check_dialog {
                     if self.allow_dialog {
                         if self.force_enter_interrupted || current != self.dialog {
                             return Ok(None);
                         }
                     } else if current.is_some() {
+                        if stage == SubmissionStage::Enter {
+                            self.typing_activity
+                                .handoff_pending
+                                .store(true, Ordering::Release);
+                        }
                         return Ok(None);
                     }
                 }
                 let output_before_write = self.raw_output.total_bytes_seen();
-                writer.write_all(bytes)?;
+                if stage == SubmissionStage::Body {
+                    let mut body = Vec::new();
+                    if !self.allow_dialog
+                        && self.typing_activity.handoff_pending.load(Ordering::Acquire)
+                    {
+                        body.extend_from_slice(" ⏐ ".as_bytes());
+                    }
+                    body.extend_from_slice(bytes);
+                    writer.write_all(&framed_submission_content(
+                        &body,
+                        self.terminal_output.is_bracketed_paste(),
+                    ))?;
+                    if !self.allow_dialog {
+                        self.typing_activity
+                            .handoff_pending
+                            .store(false, Ordering::Release);
+                    }
+                } else {
+                    writer.write_all(bytes)?;
+                }
                 writer.flush()?;
                 self.last_write_at = Instant::now();
                 return Ok(Some(output_before_write));
@@ -3149,6 +3202,103 @@ mod tests {
         assert!(guard_holds(DRAFT));
         assert!(!guard_holds(WORKING));
         assert!(guard_holds(&working_draft));
+    }
+
+    #[test]
+    fn dialog_clearing_during_typing_pause_resets_the_body_wait_bound() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(Some("claude".into()));
+        let (input, writes, task, events) =
+            submission_fixture_for(terminal.clone(), attention.clone());
+        terminal.feed_with_replies("❯ ".as_bytes());
+        input.set_typing_idle_delay(Duration::from_millis(300));
+        input.write_user_input(b"\x15").unwrap();
+        writes.recv().unwrap();
+        input
+            .submission_tx
+            .send(PtySubmission {
+                content: b"after-new-dialog".to_vec(),
+                key_delay: Duration::ZERO,
+                verification: None,
+                allow_dialog: false,
+                dialog: None,
+                queued_at: Instant::now(),
+                // Simulate the elapsed portion of the first dialog's wait.
+                dialog_wait_started: Some(Instant::now() - AUTOMATIC_DIALOG_WAIT),
+                held: true,
+                _pending_prompt: attention.reserve_prompt(),
+            })
+            .unwrap();
+        // The worker observes the cleared viewport while typing still holds delivery.
+        thread::sleep(Duration::from_millis(100));
+        terminal.feed_with_replies(
+            b"\x1b[2J\x1b[HDo you want to proceed?\r\n1. Yes\r\n2. No\r\nEnter to confirm",
+        );
+        assert!(writes.recv_timeout(Duration::from_millis(350)).is_err());
+        assert!(attention.has_pending_prompts());
+        assert!(
+            events.try_recv().is_err(),
+            "the second dialog inherited the expired wait"
+        );
+        terminal.feed_with_replies("\x1b[2J\x1b[H❯ ".as_bytes());
+        for expected in [b"after-new-dialog".as_slice(), b"\r"] {
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                expected
+            );
+        }
+        drop(input);
+        task.join().unwrap();
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn handoff_separator_is_single_use_and_human_enter_clears_it() {
+        for human_enter in [false, true] {
+            let terminal = TerminalOutput::new(24, 80, 100);
+            let attention = AttentionTracker::new(Some("claude".into()));
+            let (input, writes, task, events) =
+                submission_fixture_for(terminal.clone(), attention.clone());
+            input.set_typing_idle_delay(Duration::ZERO);
+            terminal.feed_with_replies("❯ ".as_bytes());
+            input
+                .submit_input(b"first", Duration::from_millis(150))
+                .unwrap();
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                b"first"
+            );
+            terminal.feed_with_replies(
+                b"\x1b[2J\x1b[HDo you want to proceed?\r\n1. Yes\r\n2. No\r\nEnter to confirm",
+            );
+            assert_eq!(
+                events.recv_timeout(Duration::from_secs(2)).unwrap().kind,
+                PtySubmissionEventKind::EnterBlockedByDialog
+            );
+            assert!(writes.try_recv().is_err());
+            // A ghost suggestion must not become a composer-empty gate.
+            terminal.feed_with_replies("\x1b[2J\x1b[H❯ \x1b[2mTry a follow-up\x1b[22m".as_bytes());
+            if human_enter {
+                assert!(input.write_user_input(b"\r").unwrap());
+                assert_eq!(writes.recv().unwrap().0, b"\r");
+            }
+            input.submit_input(b"second", Duration::ZERO).unwrap();
+            input.submit_input(b"third", Duration::ZERO).unwrap();
+            let second = if human_enter {
+                b"second".as_slice()
+            } else {
+                " ⏐ second".as_bytes()
+            };
+            for expected in [second, b"\r", b"third", b"\r"] {
+                assert_eq!(
+                    writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                    expected
+                );
+            }
+            drop(input);
+            task.join().unwrap();
+            assert!(events.try_recv().is_err());
+        }
     }
 
     #[test]
