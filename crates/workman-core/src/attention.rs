@@ -114,12 +114,6 @@ pub trait ToolAttentionAdapter: Send + Sync {
         false
     }
 
-    /// Whether dialog detection distinguishes the tool's own pasted composer text.
-    /// Other adapters retain the typing-pause-only submission guard.
-    fn checks_submission_dialogs(&self) -> bool {
-        false
-    }
-
     /// Text used to distinguish meaningful output from a cosmetic redraw.
     /// Adapters may remove known decorations while preserving transcript and draft text.
     fn activity_text<'a>(&self, rendered: &'a str) -> Cow<'a, str> {
@@ -544,11 +538,6 @@ impl AttentionTracker {
         }
     }
 
-    /// Only composer-aware adapters can safely check every automatic write.
-    pub(crate) fn checks_submission_dialogs(&self) -> bool {
-        self.lock().adapter.checks_submission_dialogs()
-    }
-
     /// Reserve a prompt before starting asynchronous readiness or submission work.
     /// Raw attention remains available so delivery can still detect a safe composer.
     pub fn reserve_prompt(&self) -> PendingPrompt {
@@ -754,10 +743,6 @@ fn duration_millis(duration: Duration) -> i64 {
 pub struct ClaudeCodeAdapter;
 
 impl ToolAttentionAdapter for ClaudeCodeAdapter {
-    fn checks_submission_dialogs(&self) -> bool {
-        true
-    }
-
     fn queues_input_while_working(&self) -> bool {
         true
     }
@@ -848,8 +833,6 @@ impl ToolAttentionAdapter for ClaudeCodeAdapter {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CodexAdapter;
 
-// Codex 0.162.1 Enter steers the active turn; after-turn queuing is not verified.
-// Keep the default queues_input_while_working capability disabled.
 impl ToolAttentionAdapter for CodexAdapter {
     fn detects_busy(&self) -> bool {
         true
@@ -1179,39 +1162,14 @@ fn last_resting_prompt(rendered: &str) -> Option<usize> {
 }
 
 fn last_claude_resting_prompt(rendered: &str) -> Option<usize> {
-    // Claude replaces its composer with a dialog. Prompt text and Ink's indented
-    // continuation rows belong to the resting region, even when they contain
-    // permission phrases. Use the end of that region in adapter ordering.
-    let mut resting_at = None;
-    let mut composer_indent = None;
-    let mut offset = 0;
-    for line in rendered.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if let Some(draft) = trimmed.strip_prefix('❯') {
-            composer_indent = (!is_claude_dialog_choice(draft.trim()))
-                .then_some(line.len() - line.trim_start().len());
-        } else if trimmed.is_empty()
-            || composer_indent
-                .is_some_and(|indent| line.len() - line.trim_start().len() < indent + 2)
-            || trimmed.starts_with(['─', '━'])
-            || [
-                "esc to interrupt",
-                "⏵⏵",
-                "← for agents",
-                "? for shortcuts",
-                "shift+tab",
-            ]
-            .iter()
-            .any(|marker| trimmed.to_lowercase().contains(marker))
-        {
-            composer_indent = None;
-        }
-        offset += line.len();
-        if composer_indent.is_some() {
-            resting_at = Some(offset.saturating_sub(1));
-        }
-    }
-    resting_at
+    nonempty_lines(rendered)
+        .into_iter()
+        .rev()
+        .take(8)
+        .find_map(|(offset, line)| {
+            let draft = line.strip_prefix('❯')?.trim();
+            (!is_claude_dialog_choice(draft)).then_some(offset)
+        })
 }
 
 fn last_codex_resting_prompt(rendered: &str) -> Option<usize> {
@@ -1279,12 +1237,6 @@ fn last_grok_resting_prompt(rendered: &str) -> Option<usize> {
 }
 
 pub(crate) fn is_claude_dialog_choice(text: &str) -> bool {
-    if matches!(
-        text,
-        "No, exit" | "Yes, I accept" | "Yes, I trust this folder"
-    ) {
-        return true;
-    }
     let Some((number, choice)) = text.split_once('.') else {
         return false;
     };
@@ -1379,10 +1331,6 @@ mod tests {
     fn only_verified_adapters_queue_input_while_working() {
         for tool in ["claude", "Claude Code", "claude-code"] {
             assert!(super::tool_queues_input_while_working(Some(tool)), "{tool}");
-            assert!(
-                super::adapter_for(Some(tool)).checks_submission_dialogs(),
-                "{tool}"
-            );
         }
         for tool in [
             None,
@@ -1393,10 +1341,6 @@ mod tests {
             Some("custom"),
         ] {
             assert!(!super::tool_queues_input_while_working(tool), "{tool:?}");
-            assert!(
-                !super::adapter_for(tool).checks_submission_dialogs(),
-                "{tool:?}"
-            );
         }
     }
 
@@ -1536,103 +1480,6 @@ mod tests {
             tracker.mark_exited_at(7_200);
             assert_eq!(tracker.snapshot_at(7_200).state, AttentionState::Exited);
         }
-    }
-
-    #[test]
-    fn claude_composer_stops_at_footer_and_unnumbered_dialog_choices() {
-        for (rendered, expected) in [
-            (
-                include_str!("../tests/fixtures/attention/claude_working_no_rule.txt"),
-                "busy_spinner",
-            ),
-            (
-                include_str!("../tests/fixtures/attention/claude_trust_indented_no_rule.txt"),
-                "permission_dialog",
-            ),
-            (
-                include_str!("../tests/fixtures/attention/claude_trust_footer_plus_one.txt"),
-                "permission_dialog",
-            ),
-        ] {
-            let flags = ClaudeCodeAdapter.inspect(AdapterObservation {
-                rendered,
-                alternate_screen: false,
-            });
-            assert_eq!(
-                flags.classification.as_deref(),
-                Some(expected),
-                "{rendered}"
-            );
-        }
-        for footer in [
-            "⏵⏵ auto mode",
-            "← for agents",
-            "? for shortcuts",
-            "shift+tab",
-        ] {
-            let rendered = format!("❯ draft\n   {footer}\n   Enter to confirm");
-            assert!(
-                ClaudeCodeAdapter
-                    .inspect(AdapterObservation {
-                        rendered: &rendered,
-                        alternate_screen: false
-                    })
-                    .needs_input
-            );
-        }
-        assert!(
-            ClaudeCodeAdapter
-                .inspect(AdapterObservation {
-                    rendered: "❯ draft\n\n   Enter to confirm",
-                    alternate_screen: false,
-                })
-                .needs_input
-        );
-    }
-
-    #[test]
-    fn claude_composer_block_outranks_literal_dialog_phrases() {
-        for text in ["(y/n)", "esc to cancel", "enter to confirm"] {
-            let rendered = format!(
-                "❯ Timer: check the worker output and reply\n   {text} once you have read it\n   more draft lines\n────────────────────\n"
-            );
-            let flags = ClaudeCodeAdapter.inspect(AdapterObservation {
-                rendered: &rendered,
-                alternate_screen: false,
-            });
-            assert!(
-                flags.resting_prompt && !flags.needs_input,
-                "{text}: {flags:?}"
-            );
-            let real_dialog =
-                format!("{rendered}Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel");
-            assert!(
-                ClaudeCodeAdapter
-                    .inspect(AdapterObservation {
-                        rendered: &real_dialog,
-                        alternate_screen: false
-                    })
-                    .needs_input
-            );
-            let busy_footer = format!("{rendered}✻ Thinking… (esc to interrupt)");
-            assert!(
-                ClaudeCodeAdapter
-                    .inspect(AdapterObservation {
-                        rendered: &busy_footer,
-                        alternate_screen: false
-                    })
-                    .busy
-            );
-        }
-        let trust_dialog = " Accessing workspace:\n /tmp/isolated\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel";
-        assert!(
-            ClaudeCodeAdapter
-                .inspect(AdapterObservation {
-                    rendered: trust_dialog,
-                    alternate_screen: false
-                })
-                .needs_input
-        );
     }
 
     #[test]

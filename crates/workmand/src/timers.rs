@@ -440,7 +440,7 @@ impl<'a> TimerService<'a> {
             TimerKind::IdleAll => watch_state.values().all(|progress| progress.satisfied),
             TimerKind::Delay => false,
         };
-        if already_satisfied && !self.delivery_has_dialog(delivery_process_id)? {
+        if already_satisfied {
             self.registry
                 .submit_input(delivery_process_id, body.as_bytes())?;
             self.consume_mid_turn_deliveries(owner_process_id, &watch_state);
@@ -505,9 +505,6 @@ impl<'a> TimerService<'a> {
             },
         };
         self.insert(&timer, &runtime)?;
-        if already_satisfied {
-            self.consume_mid_turn_deliveries(owner_process_id, &runtime.watch_state);
-        }
         self.registry.status_invalidations().invalidate();
         Ok(IdleTimerOutcome::Created(Box::new(
             self.view(timer, runtime)?,
@@ -838,9 +835,6 @@ impl<'a> TimerService<'a> {
             .get(timer.delivery_process_id)
             .ok()
             .map(|process| process.project_id);
-        if project_id.is_some() && self.delivery_has_dialog(timer.delivery_process_id)? {
-            return Ok(None);
-        }
         let delivered = project_id.is_some()
             && self
                 .registry
@@ -962,11 +956,6 @@ impl<'a> TimerService<'a> {
         let Some(reason) = reason else {
             return Ok(None);
         };
-        // Keep a due wake upstream of the bounded PTY dialog wait, including deadlines.
-        if self.delivery_has_dialog(timer.delivery_process_id)? {
-            self.put_runtime(timer.id, &runtime)?;
-            return Ok(None);
-        }
         let project_id = self.registry.get(timer.delivery_process_id)?.project_id;
         if self
             .registry
@@ -1424,13 +1413,6 @@ impl<'a> TimerService<'a> {
                 |row| row.get(0),
             )
             .map_err(persistence)
-    }
-
-    fn delivery_has_dialog(&mut self, process_id: ProcessId) -> TimerResult<bool> {
-        Ok(
-            self.registry.agent_attention_snapshot(process_id)?.state == AttentionState::NeedsInput
-                || self.registry.pending_dialog_viewport(process_id)?.is_some(),
-        )
     }
 
     fn consume_mid_turn_deliveries(

@@ -3028,206 +3028,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn dialog_parent(mode: &str) -> ProcessRegistry {
-        let mut registry = registry();
-        let command = format!(
-            "python3 -u '{}/tests/fixtures/dialog_composer.py' {mode}",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        registry.create(process(1, "parent", &command)).unwrap();
-        registry
-            .input_router()
-            .set_typing_pause(crate::settings::TypingPauseSettings {
-                enabled: false,
-                delay_ms: 1000,
-            });
-        registry.start(1).unwrap();
-        wait_for_output(
-            &mut registry,
-            1,
-            if mode == "before" {
-                "Do you want to proceed?"
-            } else {
-                "❯"
-            },
-        );
-        registry
-    }
-
-    #[cfg(unix)]
-    fn wait_for_submission_event(registry: &mut ProcessRegistry, kind: &str, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if registry
-                .get_status(1)
-                .unwrap()
-                .events
-                .iter()
-                .any(|event| event.kind == kind)
-                && !registry.has_pending_prompts(1)
-            {
-                return;
-            }
-            assert!(Instant::now() < deadline, "missing {kind}");
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dialog_after_notice_body_hands_off_once_and_next_timer_flows() {
-        let mut registry = dialog_parent("after");
-        registry.submit_input(1, b"hold").unwrap();
-        wait_for_output(&mut registry, 1, "RECEIVED:hold");
-        registry
-            .create(process(2, "exiting-child", "exit 0"))
-            .unwrap();
-        registry.start(2).unwrap();
-        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
-        wait_for_state(&mut registry, 2, AttentionState::Exited);
-        let mut service = SpawnerNotificationService::default();
-        service.tick(&mut registry).unwrap();
-        wait_for_submission_event(
-            &mut registry,
-            "submit_enter_blocked_by_dialog",
-            Duration::from_secs(3),
-        );
-        assert!(!registry.has_pending_prompts(1));
-        assert!(service.pending.is_empty()); // Enqueue-time bookkeeping, with no redelivery.
-        let screen = registry.rendered_output(1).unwrap().text;
-        assert!(!screen.contains("APPROVED_BY_ENTER"), "{screen}");
-
-        // The timer stays due upstream until the human dismisses the dialog. No
-        // human Enter or artificial typing pause flushes the handed-off draft.
-        let now = now_millis();
-        TimerService::new(&mut registry)
-            .set_delay("human".into(), 1, "TIMER-WAKE".into(), 0, false, None, now)
-            .unwrap();
-        assert!(
-            TimerService::new(&mut registry)
-                .tick(now + 1)
-                .unwrap()
-                .is_empty()
-        );
-        registry
-            .input_router()
-            .send_terminal_input(1, b"\x05", true)
-            .unwrap();
-        wait_for_state(&mut registry, 1, AttentionState::Working);
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            let fires = TimerService::new(&mut registry).tick(now_millis()).unwrap();
-            if !fires.is_empty() {
-                assert_eq!(fires.len(), 1);
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timer stayed held after the dialog cleared"
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
-        wait_for_output(&mut registry, 1, "RECEIVED:[workman]");
-        let raw = registry.raw_output(1, None, 64 * 1024).unwrap();
-        assert!(String::from_utf8_lossy(&raw.data).contains("output/todos ⏐ TIMER-WAKE"));
-        for _ in 0..10 {
-            service.tick(&mut registry).unwrap();
-            thread::sleep(Duration::from_millis(100));
-        }
-        let screen = registry.rendered_output(1).unwrap().text;
-        assert!(screen.contains("ENTER_COUNT:2"), "{screen}");
-        assert!(!screen.contains("ENTER_COUNT:3"), "{screen}");
-        assert!(
-            !screen.contains("APPROVED_BY_ENTER") && !screen.contains("BODY_IN_DIALOG"),
-            "{screen}"
-        );
-        assert!(!registry.has_pending_prompts(1));
-        registry.stop(1).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn wrapped_timer_body_with_permission_phrases_submits_once() {
-        let mut registry = dialog_parent("normal");
-        let body = "Timer: check the worker output and reply (y/n) once you have read it; esc to cancel and enter to confirm are literal text.";
-        let now = now_millis();
-        TimerService::new(&mut registry)
-            .set_delay("human".into(), 1, body.into(), 0, false, None, now)
-            .unwrap();
-        TimerService::new(&mut registry).tick(now + 1).unwrap();
-        wait_for_output(&mut registry, 1, "RECEIVED:Timer:");
-        thread::sleep(Duration::from_millis(1200));
-        let status = registry.get_status(1).unwrap();
-        assert!(
-            status
-                .events
-                .iter()
-                .all(|event| !event.kind.starts_with("submit_")),
-            "{:?}",
-            status.events
-        );
-        let screen = registry.rendered_output(1).unwrap().text;
-        assert_eq!(screen.matches("RECEIVED:").count(), 1, "{screen}");
-        assert!(!registry.has_pending_prompts(1));
-        registry.stop(1).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dialog_before_body_waits_then_sends_once() {
-        let mut registry = dialog_parent("before");
-        registry.submit_input(1, b"BODY-AFTER-CLEAR").unwrap();
-        thread::sleep(Duration::from_millis(250));
-        assert!(registry.has_pending_prompts(1));
-        let screen = registry.rendered_output(1).unwrap().text;
-        assert!(
-            !screen.contains("BODY_IN_DIALOG") && !screen.contains("APPROVED_BY_ENTER"),
-            "{screen}"
-        );
-        registry
-            .input_router()
-            .send_terminal_input(1, b"\x05", true)
-            .unwrap();
-        wait_for_output(&mut registry, 1, "RECEIVED:BODY-AFTER-CLEAR");
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while registry.has_pending_prompts(1) {
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(20));
-        }
-        registry.stop(1).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn permanent_dialog_drops_body_after_one_minute_and_releases_queue() {
-        let mut registry = dialog_parent("before");
-        let started = Instant::now();
-        registry.submit_input(1, b"MUST-BE-DROPPED").unwrap();
-        wait_for_submission_event(
-            &mut registry,
-            "submit_body_dialog_timeout",
-            Duration::from_secs(65),
-        );
-        assert!(started.elapsed() >= Duration::from_secs(60));
-        assert!(!registry.has_pending_prompts(1));
-        registry.submit_input(1, b"LATER-MESSAGE").unwrap();
-        registry
-            .input_router()
-            .send_terminal_input(1, b"\x05", true)
-            .unwrap();
-        wait_for_output(&mut registry, 1, "RECEIVED:LATER-MESSAGE");
-        let screen = registry.rendered_output(1).unwrap().text;
-        assert!(
-            !screen.contains("MUST-BE-DROPPED")
-                && !screen.contains("BODY_IN_DIALOG")
-                && !screen.contains("APPROVED_BY_ENTER"),
-            "{screen}"
-        );
-        assert_eq!(screen.matches("RECEIVED:").count(), 1, "{screen}");
-        registry.stop(1).unwrap();
-    }
-
-    #[cfg(unix)]
     #[test]
     fn draft_indicator_requires_the_draft_to_be_the_only_blocker() {
         let mut registry = registry();
@@ -3444,235 +3244,6 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn non_claude_permission_phrases_keep_held_only_submission_checks() {
-        for (tool, marker, body) in [
-            (
-                "codex",
-                "›",
-                "Timer: check the worker output and then would you like to run the suite again?",
-            ),
-            ("generic", ">", "Timer: reply (y/n) when the worker is done"),
-        ] {
-            let mut registry = registry();
-            let mut adapter = registry.store().get_agent_tool(90).unwrap().unwrap();
-            adapter.tool_type = tool.into();
-            registry.store().put_agent_tool(&adapter).unwrap();
-            let command = format!(
-                "python3 -u '{}/tests/fixtures/dialog_composer.py' normal {tool}",
-                env!("CARGO_MANIFEST_DIR")
-            );
-            registry.create(process(1, "parent", &command)).unwrap();
-            registry
-                .input_router()
-                .set_typing_pause(crate::settings::TypingPauseSettings {
-                    enabled: false,
-                    delay_ms: 1000,
-                });
-            registry.start(1).unwrap();
-            wait_for_output(&mut registry, 1, marker);
-            registry
-                .submit_input(1, b"Timer: control body without phrases")
-                .unwrap();
-            wait_for_output(&mut registry, 1, "ENTER_COUNT:1");
-            let now = now_millis();
-            TimerService::new(&mut registry)
-                .set_delay("human".into(), 1, body.into(), 0, false, None, now)
-                .unwrap();
-            assert_eq!(
-                TimerService::new(&mut registry)
-                    .tick(now + 1)
-                    .unwrap()
-                    .len(),
-                1
-            );
-            wait_for_output(&mut registry, 1, "ENTER_COUNT:2");
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while registry.has_pending_prompts(1) {
-                assert!(Instant::now() < deadline, "{tool}: prompt did not finish");
-                thread::sleep(Duration::from_millis(20));
-            }
-            let status = registry.get_status(1).unwrap();
-            assert!(
-                status
-                    .events
-                    .iter()
-                    .all(|event| event.kind != "submit_enter_blocked_by_dialog"),
-                "{tool}: {:?}",
-                status.events
-            );
-            assert!(!registry.has_pending_prompts(1));
-            registry.stop(1).unwrap();
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn handoff_and_nonhuman_dialog_clear_separate_the_next_child_notice() {
-        let mut registry = dialog_parent("after");
-        registry.submit_input(1, b"hold").unwrap();
-        wait_for_output(&mut registry, 1, "RECEIVED:hold");
-        registry
-            .create(process(2, "first-child", "exit 0"))
-            .unwrap();
-        registry.start(2).unwrap();
-        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
-        wait_for_state(&mut registry, 2, AttentionState::Exited);
-        let mut service = SpawnerNotificationService::default();
-        service.tick(&mut registry).unwrap();
-        wait_for_submission_event(
-            &mut registry,
-            "submit_enter_blocked_by_dialog",
-            Duration::from_secs(3),
-        );
-        registry
-            .input_router()
-            .send_terminal_input(1, b"\x05", false)
-            .unwrap();
-        wait_for_state(&mut registry, 1, AttentionState::Working);
-        registry
-            .create(process(3, "second-child", "exit 0"))
-            .unwrap();
-        registry.start(3).unwrap();
-        registry.set_notify_spawner_on_idle(1, 3, true).unwrap();
-        wait_for_state(&mut registry, 3, AttentionState::Exited);
-        service.tick(&mut registry).unwrap();
-        wait_for_output(&mut registry, 1, "ENTER_COUNT:2");
-        for _ in 0..10 {
-            service.tick(&mut registry).unwrap();
-            thread::sleep(Duration::from_millis(100));
-        }
-        let raw = registry.raw_output(1, None, 64 * 1024).unwrap();
-        let text = String::from_utf8_lossy(&raw.data);
-        assert!(
-            text.contains("output/todos ⏐ [workman] child idle: second-child"),
-            "{text}"
-        );
-        assert!(!text.contains("output/todos[workman]") && !text.contains("APPROVED_BY_ENTER"));
-        assert!(!text.contains("ENTER_COUNT:3"));
-        registry.stop(1).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn timers_stay_due_at_dialog_past_body_timeout_then_deliver_once() {
-        let mut registry = dialog_parent("before");
-        registry
-            .create(process(
-                2,
-                "busy",
-                "printf 'thinking...\\nesc to interrupt\\n'; sleep 120",
-            ))
-            .unwrap();
-        registry
-            .create(process(3, "idle", "printf '❯\\n'; sleep 120"))
-            .unwrap();
-        registry.start(2).unwrap();
-        registry.start(3).unwrap();
-        wait_for_state(&mut registry, 2, AttentionState::Working);
-        wait_for_state(&mut registry, 3, AttentionState::Idle);
-        let now = now_millis();
-        TimerService::new(&mut registry)
-            .set_delay(
-                "human".into(),
-                1,
-                "DIALOG-DELAY".into(),
-                0,
-                false,
-                None,
-                now,
-            )
-            .unwrap();
-        assert!(matches!(
-            TimerService::new(&mut registry)
-                .set_idle(
-                    "human".into(),
-                    1,
-                    "DIALOG-DEADLINE".into(),
-                    TimerKind::IdleAny,
-                    vec![2],
-                    100,
-                    now
-                )
-                .unwrap(),
-            IdleTimerOutcome::Created(_)
-        ));
-        // Even the immediate-satisfaction path must keep a wake upstream of the PTY.
-        assert!(matches!(
-            TimerService::new(&mut registry)
-                .set_idle(
-                    "human".into(),
-                    1,
-                    "DIALOG-IDLE".into(),
-                    TimerKind::IdleAll,
-                    vec![3],
-                    60_000,
-                    now
-                )
-                .unwrap(),
-            IdleTimerOutcome::Created(_)
-        ));
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(61) {
-            assert!(
-                TimerService::new(&mut registry)
-                    .tick(now_millis())
-                    .unwrap()
-                    .is_empty()
-            );
-            assert!(!registry.has_pending_prompts(1));
-            assert!(
-                registry
-                    .get_status(1)
-                    .unwrap()
-                    .events
-                    .iter()
-                    .all(|event| event.kind != "submit_body_dialog_timeout")
-            );
-            thread::sleep(Duration::from_millis(50));
-        }
-        registry
-            .input_router()
-            .send_terminal_input(1, b"\x05", false)
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(8);
-        let mut fires = Vec::new();
-        while fires.len() < 3 {
-            fires.extend(TimerService::new(&mut registry).tick(now_millis()).unwrap());
-            assert!(
-                Instant::now() < deadline,
-                "only {} timers delivered",
-                fires.len()
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
-        wait_for_output(&mut registry, 1, "ENTER_COUNT:3");
-        let screen = registry
-            .terminal_output_source(1)
-            .unwrap()
-            .unwrap()
-            .read_viewport()
-            .text();
-        for body in ["DIALOG-DELAY", "DIALOG-DEADLINE", "DIALOG-IDLE"] {
-            assert_eq!(
-                screen.matches(&format!("RECEIVED:{body}")).count(),
-                1,
-                "{screen}"
-            );
-        }
-        assert!(!screen.contains("BODY_IN_DIALOG") && !screen.contains("APPROVED_BY_ENTER"));
-        assert!(
-            TimerService::new(&mut registry)
-                .tick(now_millis() + 120_000)
-                .unwrap()
-                .is_empty()
-        );
-        for id in 1..=3 {
-            registry.stop(id).unwrap();
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn timer_consumed_completion_cannot_loop_when_owner_rearms_for_busy_sibling() {
         let mut registry = registry();
         registry.create(process(1, "owner", "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\nthinking...\\nesc to interrupt\\n' \"$line\"; if [ \"$line\" = end ]; then sleep 0.1; printf '❯\\n'; fi; done")).unwrap();
@@ -3758,6 +3329,54 @@ mod tests {
         assert!(registry.mid_turn_deliveries.is_empty());
         for id in 1..=3 {
             registry.stop(id).unwrap();
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn mid_turn_delivery_entries_clear_on_stop_kill_and_exit() {
+        for action in ["stop", "kill", "exit"] {
+            let mut registry = registry();
+            for id in 1..=3 {
+                registry
+                    .create(process(
+                        id,
+                        &format!("agent-{id}"),
+                        "stty -echo; IFS= read -r line; exit 0",
+                    ))
+                    .unwrap();
+            }
+            registry.start(2).unwrap();
+            // Process 2 occurs as both owner and child; the unrelated pair must survive.
+            registry
+                .mid_turn_deliveries
+                .extend([((1, 2), 1), ((2, 3), 2), ((1, 3), 3)]);
+            match action {
+                "stop" => {
+                    registry.stop(2).unwrap();
+                }
+                "kill" => {
+                    registry.kill(2).unwrap();
+                }
+                "exit" => {
+                    registry.send_input(2, b"exit\r").unwrap();
+                    wait_for_state(&mut registry, 2, AttentionState::Exited);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(registry.mid_turn_deliveries.len(), 1, "{action}");
+            assert_eq!(
+                registry.mid_turn_deliveries.get(&(1, 3)),
+                Some(&3),
+                "{action}"
+            );
+            assert!(
+                registry.mid_turn_completion(1, 2).unwrap().is_none(),
+                "{action}"
+            );
+            assert!(
+                registry.mid_turn_completion(2, 3).unwrap().is_none(),
+                "{action}"
+            );
         }
     }
 }

@@ -1783,6 +1783,8 @@ impl ProcessRegistry {
     fn stop_one(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
+        self.mid_turn_deliveries
+            .retain(|(owner, child), _| *owner != process_id && *child != process_id);
         self.capture_agent_session_id(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
             self.input_router.remove(process_id);
@@ -1848,6 +1850,8 @@ impl ProcessRegistry {
     fn kill_one(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
+        self.mid_turn_deliveries
+            .retain(|(owner, child), _| *owner != process_id && *child != process_id);
         self.capture_agent_session_id(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
             self.input_router.remove(process_id);
@@ -2547,6 +2551,8 @@ impl ProcessRegistry {
             let Some(status) = status else { continue };
 
             self.capture_agent_session_id(process_id)?;
+            self.mid_turn_deliveries
+                .retain(|(owner, child), _| *owner != process_id && *child != process_id);
             self.running.remove(&process_id);
             self.input_router.remove(process_id);
             let _ = self.store.clear_process_mcp_token(process_id);
@@ -2623,13 +2629,9 @@ impl ProcessRegistry {
                     "submit_stale_dialog_response",
                     "Dialog response was not sent because the dialog changed while it was queued. Check the current prompt before responding.".into(),
                 ),
-                PtySubmissionEventKind::BodyDialogTimeout => (
-                    "submit_body_dialog_timeout",
-                    "Automatic message dropped after waiting 60 seconds for a dialog to clear; no text or Enter was sent. Check the terminal before resending.".into(),
-                ),
                 PtySubmissionEventKind::EnterBlockedByDialog => (
                     "submit_enter_blocked_by_dialog",
-                    "Message text was written, but Enter was withheld because a dialog appeared or changed, or typing resumed during the response. The text is left for the human; this submission will not be retried.".into(),
+                    "Message text was written, but Enter was withheld because a dialog appeared or changed, or typing resumed during the response. Check the terminal before submitting or resending.".into(),
                 ),
                 PtySubmissionEventKind::RetryBlockedByDialog => (
                     "submit_retry_blocked_by_dialog",

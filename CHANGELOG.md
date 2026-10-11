@@ -5,14 +5,10 @@ All notable changes to Workman are recorded here.
 ## Unreleased
 
 - Deliver child notifications while Claude Code is working by queuing a follow-up prompt.
-  Keep permission dialogs, startup, human drafts, typing pauses, and pending prompts protected,
-  and report the reason when delivery has been held for a minute.
+  Keep permission dialogs, startup, human drafts, typing pauses, and pending prompts protected.
   Completions observed in separate ticks while Claude is busy arrive as separate queued messages.
-- Keep timer wakes due while their delivery target shows a dialog. Claude automatic submissions
-  racing with a dialog, MCP sends, and initial prompts wait up to 60 seconds before the body is
-  dropped with a warning and process event.
-- Withhold Enter if a Claude dialog appears after an automatic body is pasted. Leave the text
-  for the human, and separate the next automatic message with a visible single-line separator.
+- Report the reason and age when a child notification has been held for a minute, at most once
+  per minute. Show the draft-hold indicator only when a human draft is the sole blocker.
 - Let an IdleAny timer consume a child notice queued during a Working Claude turn once and
   return AlreadySatisfied, without repeatedly waking on completions already consumed by a timer.
 
