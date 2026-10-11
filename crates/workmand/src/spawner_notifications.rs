@@ -18,7 +18,7 @@ use tokio::{
 use workman_core::{
     Process, ProcessId, ProcessKind, ProcessStatus, ProjectId, SpawnerIdleNotificationSetting,
     SpawnerReportedState,
-    attention::{AgentState, AttentionState, tool_detects_busy},
+    attention::{AgentState, AttentionState, tool_detects_busy, tool_queues_input_while_working},
 };
 
 use crate::{
@@ -32,7 +32,7 @@ use crate::{
 const NOTIFICATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NEEDS_INPUT_RESET_CONFIRMATION_MS: i64 = 3_000;
 const ERROR_LOG_INTERVAL_MS: i64 = 60_000;
-const DRAFT_HOLD_LOG_AFTER_MS: i64 = 10 * 60 * 1_000;
+const DELIVERY_HOLD_LOG_AFTER_MS: i64 = 60_000;
 const MAX_CHILD_NAME_CHARS: usize = 80;
 const MAX_NOTIFICATION_ENTRIES: usize = 10;
 
@@ -107,9 +107,25 @@ struct EligibleChild {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct DraftHold {
+struct DeliveryHold {
     started_at_ms: i64,
-    logged: bool,
+    last_logged_at_ms: Option<i64>,
+}
+
+impl DeliveryHold {
+    fn log_age(&mut self, now_ms: i64) -> Option<i64> {
+        let age_ms = now_ms.saturating_sub(self.started_at_ms);
+        if age_ms >= DELIVERY_HOLD_LOG_AFTER_MS
+            && self
+                .last_logged_at_ms
+                .is_none_or(|last| now_ms.saturating_sub(last) >= ERROR_LOG_INTERVAL_MS)
+        {
+            self.last_logged_at_ms = Some(now_ms);
+            Some(age_ms)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -122,7 +138,8 @@ pub(crate) struct SpawnerNotificationService {
     dialog_identity_cache: BTreeMap<ProcessId, DialogIdentityCache>,
     suppressed_completion_ids: BTreeMap<(ProcessId, ProcessId), i64>,
     reported_finished_inputs: BTreeMap<(ProcessId, ProcessId), i64>,
-    draft_holds: BTreeMap<ProcessId, DraftHold>,
+    draft_holds: HashSet<ProcessId>,
+    delivery_holds: BTreeMap<ProcessId, DeliveryHold>,
     last_error_log_at: BTreeMap<String, i64>,
 }
 
@@ -217,13 +234,15 @@ impl SpawnerNotificationService {
             .retain(|_, logged_at| now_ms.saturating_sub(*logged_at) < ERROR_LOG_INTERVAL_MS);
         let stale_draft_holds = self
             .draft_holds
-            .keys()
+            .iter()
             .filter(|spawner_id| !self.pending.contains_key(spawner_id))
             .copied()
             .collect::<Vec<_>>();
         for spawner_id in stale_draft_holds {
             self.set_draft_hold(registry, spawner_id, false);
         }
+        self.delivery_holds
+            .retain(|spawner_id, _| self.pending.contains_key(spawner_id));
 
         self.deliver_ready(registry, now_ms);
         Ok(poll_again || !self.pending.is_empty())
@@ -685,41 +704,45 @@ impl SpawnerNotificationService {
             return Ok(());
         }
         if spawner.status != ProcessStatus::Running {
+            self.hold_delivery(spawner_id, "spawner is starting", now_ms);
             return Ok(());
         }
         let has_human_draft = registry.input_router().has_unsent_human_draft(spawner_id)?;
-        if !has_human_draft && self.draft_holds.contains_key(&spawner_id) {
-            self.set_draft_hold(registry, spawner_id, false);
-        }
+        self.set_draft_hold(registry, spawner_id, has_human_draft);
         let attention = registry.agent_attention_snapshot(spawner_id)?;
-        if registry.has_pending_prompts(spawner_id)
-            || registry
-                .input_router()
-                .automatic_submission_held(spawner_id)?
-            || !matches!(
-                attention.state,
-                AttentionState::Idle | AttentionState::Waiting
-            )
+        let hold_reason = if attention.state == AttentionState::NeedsInput
+            || registry.pending_dialog_viewport(spawner_id)?.is_some()
         {
-            return Ok(());
-        }
-        if has_human_draft {
-            self.set_draft_hold(registry, spawner_id, true);
-            let hold = self.draft_holds.entry(spawner_id).or_insert(DraftHold {
-                started_at_ms: now_ms,
-                logged: false,
-            });
-            if !hold.logged && now_ms.saturating_sub(hold.started_at_ms) >= DRAFT_HOLD_LOG_AFTER_MS
-            {
-                eprintln!(
-                    "process {spawner_id}: child notification remains held behind an unsent human draft"
-                );
-                hold.logged = true;
+            Some("spawner needs input (permission or trust dialog)")
+        } else if registry.has_pending_prompts(spawner_id) {
+            // Includes the reservation made before asynchronous initial-prompt delivery.
+            Some("spawner has a pending prompt")
+        } else if registry
+            .input_router()
+            .automatic_submission_held(spawner_id)?
+        {
+            Some("automatic submission is paused by typing")
+        } else if has_human_draft {
+            Some("spawner has an unsent human draft")
+        } else {
+            match attention.state {
+                AttentionState::Idle | AttentionState::Waiting => None,
+                AttentionState::Working if attention.last_input_at.is_none() => {
+                    Some("spawner is starting before its first prompt")
+                }
+                AttentionState::Working
+                    if tool_queues_input_while_working(attention.tool_type.as_deref()) =>
+                {
+                    None
+                }
+                AttentionState::Working => Some("tool has no verified mid-turn input queue"),
+                _ => Some("spawner is not ready"),
             }
+        };
+        if let Some(reason) = hold_reason {
+            self.hold_delivery(spawner_id, reason, now_ms);
             return Ok(());
         }
-        self.set_draft_hold(registry, spawner_id, false);
-        self.draft_holds.remove(&spawner_id);
 
         let timer_context = registry.notification_timer_context()?;
         let pending = self.pending.get(&spawner_id).cloned().unwrap_or_default();
@@ -753,10 +776,14 @@ impl SpawnerNotificationService {
             }
         }
         if deliverable.is_empty() {
+            if self.pending.contains_key(&spawner_id) {
+                self.hold_delivery(spawner_id, "child notification is not yet relevant", now_ms);
+            }
             return Ok(());
         }
         let body = notification_body(deliverable.iter());
         registry.submit_input(spawner_id, body.as_bytes())?;
+        self.delivery_holds.remove(&spawner_id);
         registry
             .input_router()
             .clear_human_draft_activity(spawner_id);
@@ -912,7 +939,7 @@ impl SpawnerNotificationService {
             return;
         };
         self.set_draft_hold(registry, spawner_id, false);
-        self.draft_holds.remove(&spawner_id);
+        self.delivery_holds.remove(&spawner_id);
         for pending in dropped.values() {
             if let Some(completion) = pending.completion {
                 self.suppress_completion(registry, spawner_id, completion, now_ms);
@@ -1019,7 +1046,9 @@ impl SpawnerNotificationService {
         {
             registry.status_invalidations().invalidate();
         }
-        if !held {
+        if held {
+            self.draft_holds.insert(spawner_id);
+        } else {
             self.draft_holds.remove(&spawner_id);
         }
     }
@@ -1031,6 +1060,23 @@ impl SpawnerNotificationService {
         });
         if remove_spawner {
             self.pending.remove(&spawner_id);
+            self.delivery_holds.remove(&spawner_id);
+        }
+    }
+
+    fn hold_delivery(&mut self, spawner_id: ProcessId, reason: &str, now_ms: i64) {
+        let hold = self
+            .delivery_holds
+            .entry(spawner_id)
+            .or_insert(DeliveryHold {
+                started_at_ms: now_ms,
+                last_logged_at_ms: None,
+            });
+        if let Some(age_ms) = hold.log_age(now_ms) {
+            eprintln!(
+                "process {spawner_id}: child notification held for {:.1}s: {reason}",
+                age_ms as f64 / 1_000.0,
+            );
         }
     }
 
@@ -1484,6 +1530,142 @@ mod tests {
                 .unwrap()
         );
         registry.stop(2).unwrap();
+    }
+
+    #[test]
+    fn delivery_hold_logs_after_one_minute_and_rate_limits_repeats() {
+        let mut hold = DeliveryHold {
+            started_at_ms: 1_000,
+            last_logged_at_ms: None,
+        };
+        assert_eq!(hold.log_age(60_999), None);
+        assert_eq!(hold.log_age(61_000), Some(60_000));
+        assert_eq!(hold.log_age(61_100), None);
+        assert_eq!(hold.log_age(120_999), None);
+        assert_eq!(hold.log_age(121_000), Some(120_000));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawner_dialog_holds_until_cleared_even_for_queue_capable_tool() {
+        let mut registry = registry();
+        registry.create(process(1, "parent",
+            "stty -echo; printf '❯\\n'; IFS= read -r show; printf 'Do you want to proceed?\\n❯ 1. Yes, allow\\n  2. No, and tell Claude\\n'; IFS= read -r answer; printf '\\033[2J\\033[H❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n❯\\n' \"$line\"; done")).unwrap();
+        registry.create(process(2, "child", "exit 0")).unwrap();
+        registry.start(1).unwrap();
+        registry.start(2).unwrap();
+        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        registry.submit_input(1, b"show dialog").unwrap();
+        wait_for_output(&mut registry, 1, "Do you want to proceed?");
+        let mut service = SpawnerNotificationService::default();
+        wait_for_state(&mut registry, 2, AttentionState::Exited);
+        service.tick_at(&mut registry, 1_000).unwrap();
+        assert!(
+            service.pending.contains_key(&1),
+            "rendered dialog must hold even during input grace"
+        );
+        wait_for_state(&mut registry, 1, AttentionState::NeedsInput);
+        service.tick_at(&mut registry, 61_000).unwrap();
+        assert!(service.pending.contains_key(&1));
+        assert_eq!(service.delivery_holds[&1].last_logged_at_ms, Some(61_000));
+        assert!(
+            !registry
+                .rendered_output(1)
+                .unwrap()
+                .text
+                .contains("[workman]")
+        );
+        registry.input_router().send_input(1, b"clear\n").unwrap();
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        service.tick(&mut registry).unwrap();
+        wait_for_output(&mut registry, 1, "child (2) exited");
+        assert!(service.pending.is_empty());
+        assert!(service.delivery_holds.is_empty());
+        registry.stop(1).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_unverified_tool_holds_until_idle() {
+        let mut registry = registry();
+        let mut parent = process(
+            1,
+            "parent",
+            "stty -echo; printf '>\\n'; while IFS= read -r line; do printf 'received:[%s]\\n>\\n' \"$line\"; done",
+        );
+        parent.agent_tool_id = Some(91);
+        registry.create(parent).unwrap();
+        registry.create(process(2, "child", "exit 0")).unwrap();
+        registry.start(1).unwrap();
+        registry.start(2).unwrap();
+        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
+        wait_for_state(&mut registry, 2, AttentionState::Exited);
+        registry.submit_input(1, b"work").unwrap();
+        wait_for_output(&mut registry, 1, "received:[work]");
+        assert_eq!(
+            registry.agent_attention_snapshot(1).unwrap().state,
+            AttentionState::Working
+        );
+        let mut service = SpawnerNotificationService::default();
+        service.tick(&mut registry).unwrap();
+        assert!(service.pending.contains_key(&1));
+        assert!(
+            !registry
+                .rendered_output(1)
+                .unwrap()
+                .text
+                .contains("[workman]")
+        );
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        service.tick(&mut registry).unwrap();
+        wait_for_output(&mut registry, 1, "child (2) exited");
+        registry.stop(1).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_and_reserved_initial_prompt_hold_notification() {
+        let mut registry = registry();
+        registry.create(process(1, "parent",
+            "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n❯\\n' \"$line\"; done")).unwrap();
+        registry.create(process(2, "child", "exit 0")).unwrap();
+        registry.start(1).unwrap();
+        registry.start(2).unwrap();
+        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
+        wait_for_state(&mut registry, 2, AttentionState::Exited);
+        let mut service = SpawnerNotificationService::default();
+        wait_for_output(&mut registry, 1, "❯");
+        assert_eq!(
+            registry.agent_attention_snapshot(1).unwrap().state,
+            AttentionState::Working
+        );
+        service.tick(&mut registry).unwrap();
+        assert!(service.pending.contains_key(&1));
+        assert!(
+            !registry
+                .rendered_output(1)
+                .unwrap()
+                .text
+                .contains("[workman]")
+        );
+        let initial = registry.reserve_prompt(1).unwrap();
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        service.tick(&mut registry).unwrap();
+        assert!(service.pending.contains_key(&1));
+        registry.submit_initial_prompt(1, b"initial").unwrap();
+        wait_for_output(&mut registry, 1, "received:[initial]");
+        drop(initial);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while registry.has_pending_prompts(1) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        service.tick(&mut registry).unwrap();
+        wait_for_output(&mut registry, 1, "child (2) exited");
+        let output = registry.rendered_output(1).unwrap().text;
+        assert!(output.find("received:[initial]").unwrap() < output.find("[workman]").unwrap());
+        registry.stop(1).unwrap();
     }
 
     #[cfg(unix)]
@@ -2298,7 +2480,7 @@ mod tests {
             .create(process(
                 1,
                 "parent",
-                "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n❯\\n' \"$line\"; done",
+                "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\nthinking...\\nesc to interrupt\\n' \"$line\"; done",
             ))
             .unwrap();
         registry
@@ -2314,6 +2496,8 @@ mod tests {
         wait_for_state(&mut registry, 2, AttentionState::Idle);
         registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
         put_actor(&registry, "timer-parent", 1);
+        submit_as(&mut registry, 1, 1, b"keep working");
+        wait_for_state(&mut registry, 1, AttentionState::Working);
 
         submit_as(&mut registry, 1, 2, b"go");
         wait_for_attention_snapshot(&registry, 2, AttentionState::Working);
@@ -2331,6 +2515,10 @@ mod tests {
         assert!(matches!(outcome, IdleTimerOutcome::Created(_)));
         wait_for_attention_snapshot(&registry, 2, AttentionState::Idle);
 
+        assert_eq!(
+            registry.agent_attention_snapshot(1).unwrap().state,
+            AttentionState::Working
+        );
         let mut service = SpawnerNotificationService::default();
         service.tick(&mut registry).unwrap();
         assert!(service.pending.is_empty());
@@ -2622,13 +2810,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn two_completions_wait_for_busy_spawner_and_arrive_in_one_turn() {
+    fn working_claude_receives_coalesced_completions_and_later_child_turn() {
         let mut registry = registry();
         registry
             .create(process(
                 1,
                 "parent",
-                "stty -echo; printf '❯\\n'; while IFS= read -r line; do if [ \"$line\" = hold ]; then printf 'thinking...\\nesc to interrupt\\n'; sleep 1; printf 'parent done\\n❯\\n'; else printf 'received:[%s]\\n❯\\n' \"$line\"; fi; done",
+                "stty -echo; printf '❯\\n'; while IFS= read -r line; do if [ \"$line\" = hold ]; then printf 'thinking...\\nesc to interrupt\\n'; :; else printf 'received:[%s]\\nthinking...\\nesc to interrupt\\n' \"$line\"; fi; done",
             ))
             .unwrap();
         for (process_id, name) in [(2, "first"), (3, "second")] {
@@ -2658,16 +2846,41 @@ mod tests {
         wait_for_state(&mut registry, 2, AttentionState::Idle);
         wait_for_state(&mut registry, 3, AttentionState::Idle);
 
+        assert_eq!(
+            registry.agent_attention_snapshot(1).unwrap().state,
+            AttentionState::Working
+        );
         let mut service = SpawnerNotificationService::default();
+        let pending_prompt = registry.reserve_prompt(1).unwrap();
         service.tick(&mut registry).unwrap();
-        assert_eq!(service.pending.get(&1).unwrap().len(), 2);
-        let before =
-            String::from_utf8_lossy(&registry.raw_output(1, None, 64 * 1024).unwrap().data)
-                .into_owned();
-        assert!(!before.contains("[workman] child idle:"));
-
-        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        assert_eq!(service.pending[&1].len(), 2);
+        drop(pending_prompt);
+        let router = registry.input_router();
+        router.set_typing_pause(crate::settings::TypingPauseSettings {
+            enabled: true,
+            delay_ms: 60_000,
+        });
+        // Clear an empty input line: no draft, but human activity still pauses automation.
+        router.send_terminal_input(1, b"\x15", true).unwrap();
+        // This scripted busy UI has no composer to confirm the empty draft.
+        router.clear_human_draft_activity(1);
+        assert!(router.automatic_submission_held(1).unwrap());
+        assert!(!router.has_unsent_human_draft(1).unwrap());
         service.tick(&mut registry).unwrap();
+        assert_eq!(service.pending[&1].len(), 2);
+        assert!(
+            !registry
+                .rendered_output(1)
+                .unwrap()
+                .text
+                .contains("[workman]")
+        );
+        router.set_typing_pause(crate::settings::TypingPauseSettings {
+            enabled: false,
+            delay_ms: 60_000,
+        });
+        service.tick(&mut registry).unwrap();
+        assert!(service.pending.is_empty());
         wait_for_output(&mut registry, 1, "[workman] child idle:");
         let output =
             String::from_utf8_lossy(&registry.raw_output(1, None, 64 * 1024).unwrap().data)
@@ -2675,6 +2888,55 @@ mod tests {
         assert_eq!(output.matches("[workman] child idle:").count(), 1);
         assert!(output.contains("first (2) finished; second (3) finished"));
 
+        let first_boundary = registry
+            .store()
+            .spawner_idle_notification_setting(2)
+            .unwrap()
+            .unwrap()
+            .last_finished_input_at
+            .unwrap();
+        assert!(
+            CompletionLedger::new(registry.store())
+                .unreported_completions(1, &[2, 3])
+                .unwrap()
+                .is_empty()
+        );
+        submit_as(&mut registry, 1, 2, b"again");
+        wait_for_state(&mut registry, 2, AttentionState::Working);
+        wait_for_state(&mut registry, 2, AttentionState::Idle);
+        service.tick(&mut registry).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let output = registry.rendered_output(1).unwrap().text;
+            if output.matches("first (2) finished").count() == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "second completion missing: {output}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            registry
+                .store()
+                .spawner_idle_notification_setting(2)
+                .unwrap()
+                .unwrap()
+                .last_finished_input_at
+                .unwrap()
+                > first_boundary
+        );
+        assert!(
+            CompletionLedger::new(registry.store())
+                .unreported_completions(1, &[2])
+                .unwrap()
+                .is_empty()
+        );
+        service.tick(&mut registry).unwrap();
+        assert!(service.pending.is_empty());
         registry.stop(1).unwrap();
+        registry.stop(2).unwrap();
+        registry.stop(3).unwrap();
     }
 }
