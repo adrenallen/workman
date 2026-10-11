@@ -102,7 +102,7 @@ fn maybe_log_opencode_missing_busy(process: &Process, state: &AgentState, now_ms
 }
 
 use crate::agent_sessions::SessionCapture;
-use crate::completion_ledger::{CompletionLedger, CompletionLedgerError};
+use crate::completion_ledger::{Completion, CompletionLedger, CompletionLedgerError};
 use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
     validate_process_working_dir,
@@ -693,6 +693,9 @@ pub struct ProcessRegistry {
     /// child emits its first frame, while a newly attached desktop can immediately replace it.
     pty_sizes: HashMap<ProcessId, PtySize>,
     outputs: HashMap<ProcessId, ProcessOutput>,
+    /// Notices queued to Working owners, consumed once by an idle timer.
+    /// Stale episodes are discarded when looked up; nothing survives daemon restart.
+    pub(crate) mid_turn_deliveries: HashMap<(ProcessId, ProcessId), i64>,
     selected: HashMap<ProjectId, ProcessId>,
     trust_snapshots: HashMap<ProcessId, TrustFields>,
     stop_grace: Duration,
@@ -855,6 +858,7 @@ impl ProcessRegistry {
             input_router: ProcessInputRouter::default(),
             pty_sizes: HashMap::new(),
             outputs: HashMap::new(),
+            mid_turn_deliveries: HashMap::new(),
             selected: HashMap::new(),
             trust_snapshots,
             stop_grace,
@@ -997,6 +1001,29 @@ impl ProcessRegistry {
         let process = self.require(process_id)?;
         let tool_type = self.tool_type_for(&process)?;
         Ok(AgentState::exited(tool_type, process.exited_at))
+    }
+
+    /// Validate against the child's current input episode, never the owner's turn clock.
+    pub(crate) fn mid_turn_completion(
+        &mut self,
+        owner: ProcessId,
+        child: ProcessId,
+    ) -> RegistryResult<Option<Completion>> {
+        let Some(id) = self.mid_turn_deliveries.get(&(owner, child)).copied() else {
+            return Ok(None);
+        };
+        let ledger = CompletionLedger::new(&self.store);
+        let completion = ledger.latest_completion(child)?;
+        let valid = completion.is_some_and(|completion| completion.id == id)
+            && !self.has_pending_prompts(child)
+            && self.agent_attention_snapshot(child)?.last_input_at
+                == ledger.completion_input_at(id)?;
+        if valid {
+            Ok(completion)
+        } else {
+            self.mid_turn_deliveries.remove(&(owner, child));
+            Ok(None)
+        }
     }
 
     pub(crate) fn reserve_prompt(&self, process_id: ProcessId) -> RegistryResult<PendingPrompt> {
@@ -1412,6 +1439,8 @@ impl ProcessRegistry {
         }
 
         let mut process = self.require(process_id)?;
+        self.mid_turn_deliveries
+            .retain(|(owner, child), _| *owner != process_id && *child != process_id);
         if process.source == ProcessSource::Yml {
             if !is_process_trusted(&process) {
                 return Err(RegistryError::Untrusted(process_id));
@@ -1754,6 +1783,8 @@ impl ProcessRegistry {
     fn stop_one(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
+        self.mid_turn_deliveries
+            .retain(|(owner, child), _| *owner != process_id && *child != process_id);
         self.capture_agent_session_id(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
             self.input_router.remove(process_id);
@@ -1819,6 +1850,8 @@ impl ProcessRegistry {
     fn kill_one(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
+        self.mid_turn_deliveries
+            .retain(|(owner, child), _| *owner != process_id && *child != process_id);
         self.capture_agent_session_id(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
             self.input_router.remove(process_id);
@@ -1907,6 +1940,8 @@ impl ProcessRegistry {
             })?;
         self.store.delete_process(process_id)?;
         self.outputs.remove(&process_id);
+        self.mid_turn_deliveries
+            .retain(|(owner, child), _| *owner != process_id && *child != process_id);
         self.pty_sizes.remove(&process_id);
         self.remove_output_file(process_id)?;
         self.trust_snapshots.remove(&process_id);
@@ -2516,6 +2551,8 @@ impl ProcessRegistry {
             let Some(status) = status else { continue };
 
             self.capture_agent_session_id(process_id)?;
+            self.mid_turn_deliveries
+                .retain(|(owner, child), _| *owner != process_id && *child != process_id);
             self.running.remove(&process_id);
             self.input_router.remove(process_id);
             let _ = self.store.clear_process_mcp_token(process_id);

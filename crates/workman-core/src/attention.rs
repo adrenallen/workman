@@ -108,6 +108,12 @@ pub trait ToolAttentionAdapter: Send + Sync {
         false
     }
 
+    /// Whether Enter in the working composer safely queues a new prompt without
+    /// interrupting or dropping the current turn. Opt in only after real CLI QA.
+    fn queues_input_while_working(&self) -> bool {
+        false
+    }
+
     /// Text used to distinguish meaningful output from a cosmetic redraw.
     /// Adapters may remove known decorations while preserving transcript and draft text.
     fn activity_text<'a>(&self, rendered: &'a str) -> Cow<'a, str> {
@@ -715,6 +721,12 @@ pub fn tool_detects_busy(tool_type: Option<&str>) -> bool {
     adapter_for(tool_type).detects_busy()
 }
 
+/// Whether this tool has a verified mid-turn input queue. Dialog, draft, startup,
+/// and pending-submission guards still apply to callers using this capability.
+pub fn tool_queues_input_while_working(tool_type: Option<&str>) -> bool {
+    adapter_for(tool_type).queues_input_while_working()
+}
+
 fn normalize_tool_type(tool_type: &str) -> String {
     tool_type
         .trim()
@@ -731,6 +743,10 @@ fn duration_millis(duration: Duration) -> i64 {
 pub struct ClaudeCodeAdapter;
 
 impl ToolAttentionAdapter for ClaudeCodeAdapter {
+    fn queues_input_while_working(&self) -> bool {
+        true
+    }
+
     fn detects_busy(&self) -> bool {
         true
     }
@@ -1311,6 +1327,23 @@ fn now_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_verified_adapters_queue_input_while_working() {
+        for tool in ["claude", "Claude Code", "claude-code"] {
+            assert!(super::tool_queues_input_while_working(Some(tool)), "{tool}");
+        }
+        for tool in [
+            None,
+            Some("codex"),
+            Some("kimi"),
+            Some("opencode"),
+            Some("gemini"),
+            Some("custom"),
+        ] {
+            assert!(!super::tool_queues_input_while_working(tool), "{tool:?}");
+        }
+    }
+
     use crate::terminal::TerminalEmulator;
 
     use super::*;

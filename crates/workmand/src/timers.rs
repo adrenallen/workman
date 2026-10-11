@@ -243,6 +243,7 @@ pub(crate) struct TimerSatisfaction {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TimerSatisfactionReason {
     UnseenCompletion,
+    QueuedNotice,
     FreshTransition,
     Deadline,
     Error,
@@ -408,14 +409,28 @@ impl<'a> TimerService<'a> {
         for process_id in &watch_process_ids {
             let idle = idle_by_process[process_id];
             let unseen = idle.then(|| unseen_by_process.get(process_id)).flatten();
-            let already_satisfied = kind == TimerKind::IdleAll && idle || unseen.is_some();
+            let queued = if kind == TimerKind::IdleAny
+                && let Some(owner) = owner_process_id
+            {
+                self.registry
+                    .mid_turn_completion(owner, *process_id)?
+                    .filter(|_| idle)
+            } else {
+                None
+            };
+            let completion = unseen.copied().or(queued);
+            let already_satisfied = kind == TimerKind::IdleAll && idle || completion.is_some();
             let mut progress = WatchProgress::new(idle, already_satisfied);
-            if let Some(completion) = unseen {
+            if let Some(completion) = completion {
                 progress.completion_id = Some(completion.id);
                 satisfied_by.push(TimerSatisfaction {
                     process_id: Some(*process_id),
                     completed_at_ms: Some(completion.completed_at_ms),
-                    reason: TimerSatisfactionReason::UnseenCompletion,
+                    reason: if unseen.is_some() {
+                        TimerSatisfactionReason::UnseenCompletion
+                    } else {
+                        TimerSatisfactionReason::QueuedNotice
+                    },
                 });
             }
             watch_state.insert(*process_id, progress);
@@ -428,6 +443,7 @@ impl<'a> TimerService<'a> {
         if already_satisfied {
             self.registry
                 .submit_input(delivery_process_id, body.as_bytes())?;
+            self.consume_mid_turn_deliveries(owner_process_id, &watch_state);
             if let Some(owner_process_id) = owner_process_id {
                 let ledger = CompletionLedger::new(self.registry.store());
                 if owner_process_id != delivery_process_id
@@ -918,6 +934,7 @@ impl<'a> TimerService<'a> {
                             .rev()
                             .find_map(|satisfaction| match satisfaction.reason {
                                 TimerSatisfactionReason::UnseenCompletion
+                                | TimerSatisfactionReason::QueuedNotice
                                 | TimerSatisfactionReason::FreshTransition => {
                                     Some(satisfaction.reason)
                                 }
@@ -949,6 +966,8 @@ impl<'a> TimerService<'a> {
             // the target process is started again.
             return Ok(None);
         }
+
+        self.consume_mid_turn_deliveries(timer.owner_process_id, &runtime.watch_state);
 
         // Persist the consumed/rescheduled timer immediately after the externally visible
         // submit_input side effect. No fallible ledger operation may leave it pending and
@@ -1394,6 +1413,27 @@ impl<'a> TimerService<'a> {
                 |row| row.get(0),
             )
             .map_err(persistence)
+    }
+
+    fn consume_mid_turn_deliveries(
+        &mut self,
+        owner: Option<ProcessId>,
+        watch_state: &BTreeMap<ProcessId, WatchProgress>,
+    ) {
+        if let Some(owner) = owner {
+            for (child, progress) in watch_state {
+                if progress.completion_id.is_some()
+                    && self
+                        .registry
+                        .mid_turn_deliveries
+                        .get(&(owner, *child))
+                        .copied()
+                        == progress.completion_id
+                {
+                    self.registry.mid_turn_deliveries.remove(&(owner, *child));
+                }
+            }
+        }
     }
 
     fn process_is_idle(&mut self, process_id: ProcessId) -> TimerResult<bool> {
