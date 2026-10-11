@@ -56,6 +56,9 @@ pub const DEFAULT_OUTPUT_SPILL_CAPACITY: usize = 8 * 1024 * 1024;
 /// automation away for a generous human-edit window, then allow it to proceed.
 const UNKNOWN_COMPOSER_DRAFT_HOLD: Duration = Duration::from_secs(120);
 
+// A misclassified or unattended dialog must not hold the process input FIFO forever.
+const AUTOMATIC_DIALOG_WAIT: Duration = Duration::from_secs(60);
+
 /// Default PTY dimensions used when the caller has not observed a terminal yet.
 pub const DEFAULT_PTY_SIZE: PtySize = PtySize {
     rows: 24,
@@ -750,6 +753,7 @@ impl PtyInputHandle {
                 allow_dialog,
                 dialog,
                 queued_at,
+                dialog_wait_started: None,
                 held: !self.typing_activity.remaining().is_zero(),
                 _pending_prompt: self.attention.reserve_prompt(),
             })
@@ -764,6 +768,7 @@ struct PtySubmission {
     allow_dialog: bool,
     dialog: Option<PendingDialog>,
     queued_at: Instant,
+    dialog_wait_started: Option<Instant>,
     held: bool,
     _pending_prompt: PendingPrompt,
 }
@@ -792,6 +797,7 @@ pub enum PtySubmissionVerificationMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PtySubmissionEventKind {
     StaleDialogResponse,
+    BodyDialogTimeout,
     EnterBlockedByDialog,
     RetryBlockedByDialog,
     Retried,
@@ -1331,6 +1337,13 @@ fn process_submissions(
             Ok(None) => {
                 if submission.allow_dialog {
                     report_dialog_block(&events, PtySubmissionEventKind::StaleDialogResponse);
+                } else if submission
+                    .dialog_wait_started
+                    .get_or_insert_with(Instant::now)
+                    .elapsed()
+                    >= AUTOMATIC_DIALOG_WAIT
+                {
+                    report_dialog_block(&events, PtySubmissionEventKind::BodyDialogTimeout);
                 } else {
                     submission.held = gate.held;
                     queue_was_held |= gate.held;
@@ -1429,6 +1442,7 @@ fn current_submission_dialog(
         if composer {
             // Keep the prompt marker as a resting-state boundary, but never classify the
             // user's draft (or our just-pasted body) as a permission request.
+            rendered.push_str(&row.text[..row.text.len() - line.len()]);
             rendered.push(line.chars().next().unwrap());
         } else if !draft_wrap {
             rendered.push_str(&row.text);
@@ -1689,7 +1703,7 @@ impl SubmissionGate<'_> {
                 self.typing_activity.active_since(self.queued_at)
             };
             if remaining.is_zero() {
-                if self.held {
+                if !self.allow_dialog || self.held {
                     let current = current_submission_dialog(self.attention, self.terminal_output);
                     if self.allow_dialog {
                         if self.force_enter_interrupted || current != self.dialog {

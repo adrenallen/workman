@@ -704,11 +704,11 @@ impl SpawnerNotificationService {
             return Ok(());
         }
         if spawner.status != ProcessStatus::Running {
+            self.set_draft_hold(registry, spawner_id, false);
             self.hold_delivery(spawner_id, "spawner is starting", now_ms);
             return Ok(());
         }
         let has_human_draft = registry.input_router().has_unsent_human_draft(spawner_id)?;
-        self.set_draft_hold(registry, spawner_id, has_human_draft);
         let attention = registry.agent_attention_snapshot(spawner_id)?;
         let hold_reason = if attention.state == AttentionState::NeedsInput
             || registry.pending_dialog_viewport(spawner_id)?.is_some()
@@ -722,8 +722,6 @@ impl SpawnerNotificationService {
             .automatic_submission_held(spawner_id)?
         {
             Some("automatic submission is paused by typing")
-        } else if has_human_draft {
-            Some("spawner has an unsent human draft")
         } else {
             match attention.state {
                 AttentionState::Idle | AttentionState::Waiting => None,
@@ -739,6 +737,13 @@ impl SpawnerNotificationService {
                 _ => Some("spawner is not ready"),
             }
         };
+        self.set_draft_hold(
+            registry,
+            spawner_id,
+            hold_reason.is_none() && has_human_draft,
+        );
+        let hold_reason =
+            hold_reason.or(has_human_draft.then_some("spawner has an unsent human draft"));
         if let Some(reason) = hold_reason {
             self.hold_delivery(spawner_id, reason, now_ms);
             return Ok(());
@@ -2234,7 +2239,7 @@ mod tests {
         wait_for_output(&mut registry, 1, "dialog-child (2) needs input");
         wait_for_state(&mut registry, 1, AttentionState::Idle);
 
-        registry.submit_input(2, b"yes").unwrap();
+        registry.submit_dialog_response(2, b"yes").unwrap();
         wait_for_state(&mut registry, 2, AttentionState::Working);
         wait_for_state(&mut registry, 2, AttentionState::NeedsInput);
         service.tick_at(&mut registry, base + 1_000).unwrap();
@@ -2720,7 +2725,7 @@ mod tests {
             .create(process(
                 1,
                 "parent",
-                "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n❯\\n' \"$line\"; done",
+                "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\nthinking...\\nesc to interrupt\\n' \"$line\"; sleep 0.1; printf '❯\\n'; done",
             ))
             .unwrap();
         for (process_id, name) in [(2, "opted"), (3, "not-opted-in")] {
@@ -2805,6 +2810,451 @@ mod tests {
                 .is_empty()
         );
 
+        registry.stop(1).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn check_mid_turn_notices(child_count: i64) {
+        let mut registry = registry();
+        registry.create(process(1, "parent", "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\nthinking...\\nesc to interrupt\\n' \"$line\"; if [ \"$line\" = end ]; then sleep 0.1; printf '❯\\n'; fi; done")).unwrap();
+        registry.create(process(2, "child", "printf '❯\\n'; while IFS= read -r line; do printf 'thinking...\\nesc to interrupt\\n'; sleep 0.1; printf 'done\\n❯\\n'; done")).unwrap();
+        if child_count == 2 {
+            registry.create(process(3, "second-child", "printf '❯\\n'; while IFS= read -r line; do printf 'thinking...\\nesc to interrupt\\n'; sleep 0.1; printf 'done\\n❯\\n'; done")).unwrap();
+        }
+        for id in 1..=child_count + 1 {
+            registry.start(id).unwrap();
+            wait_for_state(&mut registry, id, AttentionState::Idle);
+        }
+        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
+        put_actor(&registry, "mid-turn-parent", 1);
+        submit_as(&mut registry, 1, 1, b"hold");
+        wait_for_state(&mut registry, 1, AttentionState::Working);
+        submit_as(&mut registry, 1, 2, b"go");
+        wait_for_state(&mut registry, 2, AttentionState::Working);
+        wait_for_state(&mut registry, 2, AttentionState::Idle);
+        let mut service = SpawnerNotificationService::default();
+        service.tick(&mut registry).unwrap();
+        wait_for_output(&mut registry, 1, "child (2) finished");
+        service.tick(&mut registry).unwrap();
+        assert!(
+            CompletionLedger::new(registry.store())
+                .unreported_completions(1, &[2])
+                .unwrap()
+                .is_empty()
+        );
+        if child_count == 2 {
+            // A later tick queues a second notice, advancing the owner's last_input_at.
+            let first_input = registry.agent_attention_snapshot(1).unwrap().last_input_at;
+            registry.set_notify_spawner_on_idle(1, 3, true).unwrap();
+            submit_as(&mut registry, 1, 3, b"go");
+            wait_for_state(&mut registry, 3, AttentionState::Working);
+            wait_for_state(&mut registry, 3, AttentionState::Idle);
+            service.tick(&mut registry).unwrap();
+            wait_for_output(&mut registry, 1, "second-child (3) finished");
+            assert!(registry.agent_attention_snapshot(1).unwrap().last_input_at > first_input);
+        }
+        let now = now_millis();
+        let outcome = TimerService::new(&mut registry)
+            .set_idle(
+                "mid-turn-parent".into(),
+                1,
+                "TIMER-WAKE".into(),
+                TimerKind::IdleAny,
+                vec![2],
+                60_000,
+                now,
+            )
+            .unwrap();
+        let IdleTimerOutcome::AlreadySatisfied { satisfied_by, .. } = outcome else {
+            panic!("queued completion must satisfy the watch immediately");
+        };
+        assert_eq!(satisfied_by.len(), 1);
+        assert_eq!(satisfied_by[0].process_id, Some(2));
+        assert_eq!(
+            satisfied_by[0].reason,
+            TimerSatisfactionReason::CompletedThisTurn
+        );
+        wait_for_output(&mut registry, 1, "received:[TIMER-WAKE]");
+        assert!(
+            TimerService::new(&mut registry)
+                .tick(now + 60_001)
+                .unwrap()
+                .is_empty()
+        );
+        let deadline = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < deadline {
+            service.tick(&mut registry).unwrap();
+            thread::sleep(Duration::from_millis(20));
+        }
+        let output =
+            String::from_utf8_lossy(&registry.raw_output(1, None, 64 * 1024).unwrap().data)
+                .into_owned();
+        assert_eq!(output.matches("received:[TIMER-WAKE]").count(), 1);
+
+        // A child re-prompt invalidates its reported completion even if typing
+        // pause leaves its previous idle frame visible while the body is queued.
+        registry
+            .input_router()
+            .set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: true,
+                delay_ms: 60_000,
+            });
+        registry
+            .input_router()
+            .send_terminal_input(2, b"", true)
+            .unwrap();
+        submit_as(&mut registry, 1, 2, b"next turn");
+        assert!(registry.has_pending_prompts(2));
+        let outcome = TimerService::new(&mut registry)
+            .set_idle(
+                "mid-turn-parent".into(),
+                1,
+                "WAIT-FOR-NEW-CHILD-TURN".into(),
+                TimerKind::IdleAny,
+                vec![2],
+                60_000,
+                now_millis(),
+            )
+            .unwrap();
+        let IdleTimerOutcome::Created(timer) = outcome else {
+            panic!("a re-prompted child's previous completion must not satisfy a watch");
+        };
+        TimerService::new(&mut registry)
+            .cancel("mid-turn-parent", 1, timer.timer.id)
+            .unwrap();
+        registry
+            .input_router()
+            .set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: false,
+                delay_ms: 1000,
+            });
+        wait_for_state(&mut registry, 2, AttentionState::Working);
+        wait_for_state(&mut registry, 2, AttentionState::Idle);
+        // Consume the new episode so the next assertion isolates the owner boundary.
+        let ledger = CompletionLedger::new(registry.store());
+        ledger
+            .mark_completions_reported(1, ledger.latest_completion(2).unwrap())
+            .unwrap();
+        registry.submit_input(1, b"end").unwrap();
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        assert!(
+            CompletionLedger::new(registry.store())
+                .latest_completion(1)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            matches!(
+                TimerService::new(&mut registry)
+                    .set_idle(
+                        "mid-turn-parent".into(),
+                        1,
+                        "NEXT-TURN-WAIT".into(),
+                        TimerKind::IdleAny,
+                        vec![2],
+                        60_000,
+                        now_millis(),
+                    )
+                    .unwrap(),
+                IdleTimerOutcome::Created(_)
+            ),
+            "a completion from the previous owner turn must not satisfy a new watch"
+        );
+        registry.stop(1).unwrap();
+        for id in 2..=child_count + 1 {
+            registry.stop(id).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_any_after_one_mid_turn_notice_is_already_satisfied() {
+        check_mid_turn_notices(1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_any_after_two_mid_turn_notices_is_already_satisfied() {
+        check_mid_turn_notices(2);
+    }
+
+    #[cfg(unix)]
+    fn dialog_parent(mode: &str) -> ProcessRegistry {
+        let mut registry = registry();
+        let command = format!(
+            "python3 -u '{}/tests/fixtures/dialog_composer.py' {mode}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        registry.create(process(1, "parent", &command)).unwrap();
+        registry
+            .input_router()
+            .set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: false,
+                delay_ms: 1000,
+            });
+        registry.start(1).unwrap();
+        wait_for_output(
+            &mut registry,
+            1,
+            if mode == "before" {
+                "Do you want to proceed?"
+            } else {
+                "❯"
+            },
+        );
+        registry
+    }
+
+    #[cfg(unix)]
+    fn wait_for_submission_event(registry: &mut ProcessRegistry, kind: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if registry
+                .get_status(1)
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| event.kind == kind)
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "missing {kind}");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dialog_after_notice_body_hands_off_once_and_next_timer_flows() {
+        let mut registry = dialog_parent("after");
+        registry.submit_input(1, b"hold").unwrap();
+        wait_for_output(&mut registry, 1, "RECEIVED:hold");
+        registry
+            .create(process(2, "exiting-child", "exit 0"))
+            .unwrap();
+        registry.start(2).unwrap();
+        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
+        wait_for_state(&mut registry, 2, AttentionState::Exited);
+        let mut service = SpawnerNotificationService::default();
+        service.tick(&mut registry).unwrap();
+        wait_for_submission_event(
+            &mut registry,
+            "submit_enter_blocked_by_dialog",
+            Duration::from_secs(3),
+        );
+        assert!(!registry.has_pending_prompts(1));
+        assert!(service.pending.is_empty()); // Enqueue-time bookkeeping, with no redelivery.
+        let screen = registry.rendered_output(1).unwrap().text;
+        assert!(!screen.contains("APPROVED_BY_ENTER"), "{screen}");
+
+        // A later timer queues behind the real dialog. Human dismisses it and submits
+        // the handed-off draft while typing pause keeps the timer out of that draft.
+        let now = now_millis();
+        TimerService::new(&mut registry)
+            .set_delay("human".into(), 1, "TIMER-WAKE".into(), 0, false, None, now)
+            .unwrap();
+        TimerService::new(&mut registry).tick(now + 1).unwrap();
+        registry
+            .input_router()
+            .set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: true,
+                delay_ms: 60_000,
+            });
+        registry
+            .input_router()
+            .send_terminal_input(1, b"\x05", true)
+            .unwrap();
+        wait_for_output(&mut registry, 1, "❯ [workman]");
+        registry
+            .input_router()
+            .send_terminal_input(1, b"\r", true)
+            .unwrap();
+        wait_for_output(&mut registry, 1, "RECEIVED:[workman]");
+        registry
+            .input_router()
+            .set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: false,
+                delay_ms: 1000,
+            });
+        wait_for_output(&mut registry, 1, "RECEIVED:TIMER-WAKE");
+        for _ in 0..10 {
+            service.tick(&mut registry).unwrap();
+            thread::sleep(Duration::from_millis(100));
+        }
+        let screen = registry.rendered_output(1).unwrap().text;
+        assert!(screen.contains("ENTER_COUNT:3"), "{screen}");
+        assert!(!screen.contains("ENTER_COUNT:4"), "{screen}");
+        assert!(
+            !screen.contains("APPROVED_BY_ENTER") && !screen.contains("BODY_IN_DIALOG"),
+            "{screen}"
+        );
+        assert!(!registry.has_pending_prompts(1));
+        registry.stop(1).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapped_timer_body_with_permission_phrases_submits_once() {
+        let mut registry = dialog_parent("normal");
+        let body = "Timer: check the worker output and reply (y/n) once you have read it; esc to cancel and enter to confirm are literal text.";
+        let now = now_millis();
+        TimerService::new(&mut registry)
+            .set_delay("human".into(), 1, body.into(), 0, false, None, now)
+            .unwrap();
+        TimerService::new(&mut registry).tick(now + 1).unwrap();
+        wait_for_output(&mut registry, 1, "RECEIVED:Timer:");
+        thread::sleep(Duration::from_millis(1200));
+        let status = registry.get_status(1).unwrap();
+        assert!(
+            status
+                .events
+                .iter()
+                .all(|event| !event.kind.starts_with("submit_")),
+            "{:?}",
+            status.events
+        );
+        let screen = registry.rendered_output(1).unwrap().text;
+        assert_eq!(screen.matches("RECEIVED:").count(), 1, "{screen}");
+        assert!(!registry.has_pending_prompts(1));
+        registry.stop(1).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dialog_before_body_waits_then_sends_once() {
+        let mut registry = dialog_parent("before");
+        registry.submit_input(1, b"BODY-AFTER-CLEAR").unwrap();
+        thread::sleep(Duration::from_millis(250));
+        assert!(registry.has_pending_prompts(1));
+        let screen = registry.rendered_output(1).unwrap().text;
+        assert!(
+            !screen.contains("BODY_IN_DIALOG") && !screen.contains("APPROVED_BY_ENTER"),
+            "{screen}"
+        );
+        registry
+            .input_router()
+            .send_terminal_input(1, b"\x05", true)
+            .unwrap();
+        wait_for_output(&mut registry, 1, "RECEIVED:BODY-AFTER-CLEAR");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while registry.has_pending_prompts(1) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(20));
+        }
+        registry.stop(1).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permanent_dialog_drops_body_after_one_minute_and_releases_queue() {
+        let mut registry = dialog_parent("before");
+        let started = Instant::now();
+        registry.submit_input(1, b"MUST-BE-DROPPED").unwrap();
+        wait_for_submission_event(
+            &mut registry,
+            "submit_body_dialog_timeout",
+            Duration::from_secs(65),
+        );
+        assert!(started.elapsed() >= Duration::from_secs(60));
+        assert!(!registry.has_pending_prompts(1));
+        registry.submit_input(1, b"LATER-MESSAGE").unwrap();
+        registry
+            .input_router()
+            .send_terminal_input(1, b"\x05", true)
+            .unwrap();
+        wait_for_output(&mut registry, 1, "RECEIVED:LATER-MESSAGE");
+        let screen = registry.rendered_output(1).unwrap().text;
+        assert!(
+            !screen.contains("MUST-BE-DROPPED")
+                && !screen.contains("BODY_IN_DIALOG")
+                && !screen.contains("APPROVED_BY_ENTER"),
+            "{screen}"
+        );
+        assert_eq!(screen.matches("RECEIVED:").count(), 1, "{screen}");
+        registry.stop(1).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn draft_indicator_requires_the_draft_to_be_the_only_blocker() {
+        let mut registry = registry();
+        let mut parent = process(
+            1,
+            "parent",
+            r#"stty raw -echo; printf '❯ '; exec perl -e '$|=1; my $draft=""; while (sysread(STDIN,my $chunk,4096)) { for my $c (split //,$chunk) { if (ord($c)==4) { print "\e[2J\e[HDo you want to proceed?\r\n1. Yes\r\n2. No\r\nPress enter to continue"; next; } if (ord($c)==5) { print "\e[2J\e[H❯ $draft"; next; } if ($c eq "\r") { print "\e[2J\e[Hworking\r\n❯ $draft"; next; } $draft.=$c; print "\r\e[2K❯ $draft"; } }'"#,
+        );
+        parent.agent_tool_id = Some(91); // No verified queue-while-working capability.
+        registry.create(parent).unwrap();
+        registry.create(process(2, "child", "exit 0")).unwrap();
+        registry
+            .input_router()
+            .set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: false,
+                delay_ms: 1000,
+            });
+        registry.start(1).unwrap();
+        registry.start(2).unwrap();
+        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
+        wait_for_state(&mut registry, 2, AttentionState::Exited);
+        registry
+            .input_router()
+            .send_terminal_input(1, b"human draft", true)
+            .unwrap();
+        wait_for_output(&mut registry, 1, "❯ human draft");
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        let mut service = SpawnerNotificationService::default();
+        service.tick(&mut registry).unwrap();
+        assert!(registry.input_router().notification_held_by_draft(1));
+        let reservation = registry.reserve_prompt(1).unwrap();
+        service.tick(&mut registry).unwrap();
+        assert!(!registry.input_router().notification_held_by_draft(1));
+        drop(reservation);
+        registry
+            .input_router()
+            .set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: true,
+                delay_ms: 60_000,
+            });
+        registry
+            .input_router()
+            .send_terminal_input(1, b"", true)
+            .unwrap();
+        service.tick(&mut registry).unwrap();
+        assert!(!registry.input_router().notification_held_by_draft(1));
+        registry
+            .input_router()
+            .set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: false,
+                delay_ms: 1000,
+            });
+        registry.send_input(1, b"\x04").unwrap();
+        wait_for_state(&mut registry, 1, AttentionState::NeedsInput);
+        assert!(registry.pending_dialog_viewport(1).unwrap().is_some());
+        assert!(registry.input_router().has_unsent_human_draft(1).unwrap());
+        service.tick(&mut registry).unwrap();
+        assert!(!registry.input_router().notification_held_by_draft(1));
+        registry.send_input(1, b"\x05").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while registry.pending_dialog_viewport(1).unwrap().is_some() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        service.tick(&mut registry).unwrap();
+        assert!(registry.input_router().notification_held_by_draft(1));
+        registry.send_input(1, b"\r").unwrap();
+        wait_for_output(&mut registry, 1, "working");
+        assert_eq!(
+            registry.agent_attention_snapshot(1).unwrap().state,
+            AttentionState::Working
+        );
+        assert!(registry.input_router().has_unsent_human_draft(1).unwrap());
+        service.tick(&mut registry).unwrap();
+        assert!(!registry.input_router().notification_held_by_draft(1));
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        service.tick(&mut registry).unwrap();
+        assert!(registry.input_router().notification_held_by_draft(1));
+        assert!(service.pending.contains_key(&1));
         registry.stop(1).unwrap();
     }
 

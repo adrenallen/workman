@@ -538,6 +538,11 @@ impl AttentionTracker {
         }
     }
 
+    /// Unix timestamp of this process incarnation's spawn.
+    pub fn started_at(&self) -> i64 {
+        self.lock().started_at
+    }
+
     /// Reserve a prompt before starting asynchronous readiness or submission work.
     /// Raw attention remains available so delivery can still detect a safe composer.
     pub fn reserve_prompt(&self) -> PendingPrompt {
@@ -1164,14 +1169,30 @@ fn last_resting_prompt(rendered: &str) -> Option<usize> {
 }
 
 fn last_claude_resting_prompt(rendered: &str) -> Option<usize> {
-    nonempty_lines(rendered)
-        .into_iter()
-        .rev()
-        .take(8)
-        .find_map(|(offset, line)| {
-            let draft = line.strip_prefix('❯')?.trim();
-            (!is_claude_dialog_choice(draft)).then_some(offset)
-        })
+    // Claude replaces its composer with a dialog. Prompt text and Ink's indented
+    // continuation rows belong to the resting region, even when they contain
+    // permission phrases. Use the end of that region in adapter ordering.
+    let mut resting_at = None;
+    let mut composer_indent = None;
+    let mut offset = 0;
+    for line in rendered.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(draft) = trimmed.strip_prefix('❯') {
+            composer_indent = (!is_claude_dialog_choice(draft.trim()))
+                .then_some(line.len() - line.trim_start().len());
+        } else if !trimmed.is_empty()
+            && (composer_indent
+                .is_some_and(|indent| line.len() - line.trim_start().len() < indent + 2)
+                || trimmed.starts_with(['─', '━']))
+        {
+            composer_indent = None;
+        }
+        offset += line.len();
+        if composer_indent.is_some() {
+            resting_at = Some(offset.saturating_sub(1));
+        }
+    }
+    resting_at
 }
 
 fn last_codex_resting_prompt(rendered: &str) -> Option<usize> {
@@ -1482,6 +1503,51 @@ mod tests {
             tracker.mark_exited_at(7_200);
             assert_eq!(tracker.snapshot_at(7_200).state, AttentionState::Exited);
         }
+    }
+
+    #[test]
+    fn claude_composer_block_outranks_literal_dialog_phrases() {
+        for text in ["(y/n)", "esc to cancel", "enter to confirm"] {
+            let rendered = format!(
+                "❯ Timer: check the worker output and reply\n   {text} once you have read it\n   more draft lines\n────────────────────\n"
+            );
+            let flags = ClaudeCodeAdapter.inspect(AdapterObservation {
+                rendered: &rendered,
+                alternate_screen: false,
+            });
+            assert!(
+                flags.resting_prompt && !flags.needs_input,
+                "{text}: {flags:?}"
+            );
+            let real_dialog =
+                format!("{rendered}Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel");
+            assert!(
+                ClaudeCodeAdapter
+                    .inspect(AdapterObservation {
+                        rendered: &real_dialog,
+                        alternate_screen: false
+                    })
+                    .needs_input
+            );
+            let busy_footer = format!("{rendered}✻ Thinking… (esc to interrupt)");
+            assert!(
+                ClaudeCodeAdapter
+                    .inspect(AdapterObservation {
+                        rendered: &busy_footer,
+                        alternate_screen: false
+                    })
+                    .busy
+            );
+        }
+        let trust_dialog = " Accessing workspace:\n /tmp/isolated\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel";
+        assert!(
+            ClaudeCodeAdapter
+                .inspect(AdapterObservation {
+                    rendered: trust_dialog,
+                    alternate_screen: false
+                })
+                .needs_input
+        );
     }
 
     #[test]

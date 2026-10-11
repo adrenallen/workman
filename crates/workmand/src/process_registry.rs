@@ -999,6 +999,22 @@ impl ProcessRegistry {
         Ok(AgentState::exited(tool_type, process.exited_at))
     }
 
+    /// The owner turn boundary does not move when another notice is queued mid-turn.
+    pub(crate) fn last_turn_end_at(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<Option<i64>> {
+        self.get_status(process_id)?; // Record a turn that has just ended before reading its ledger.
+        Ok(CompletionLedger::new(&self.store)
+            .latest_completion(process_id)?
+            .map(|completion| completion.completed_at_ms)
+            .or_else(|| {
+                self.outputs
+                    .get(&process_id)
+                    .map(|output| output.attention.started_at())
+            }))
+    }
+
     pub(crate) fn reserve_prompt(&self, process_id: ProcessId) -> RegistryResult<PendingPrompt> {
         Ok(self
             .input_router
@@ -2592,9 +2608,13 @@ impl ProcessRegistry {
                     "submit_stale_dialog_response",
                     "Dialog response was not sent because the dialog changed while it was queued. Check the current prompt before responding.".into(),
                 ),
+                PtySubmissionEventKind::BodyDialogTimeout => (
+                    "submit_body_dialog_timeout",
+                    "Automatic message dropped after waiting 60 seconds for a dialog to clear; no text or Enter was sent. Check the terminal before resending.".into(),
+                ),
                 PtySubmissionEventKind::EnterBlockedByDialog => (
                     "submit_enter_blocked_by_dialog",
-                    "Message text was written, but Enter was withheld because a dialog appeared or changed, or typing resumed during the response. Check the terminal before submitting or resending.".into(),
+                    "Message text was written, but Enter was withheld because a dialog appeared or changed, or typing resumed during the response. The text is left for the human; this submission will not be retried.".into(),
                 ),
                 PtySubmissionEventKind::RetryBlockedByDialog => (
                     "submit_retry_blocked_by_dialog",

@@ -243,6 +243,7 @@ pub(crate) struct TimerSatisfaction {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TimerSatisfactionReason {
     UnseenCompletion,
+    CompletedThisTurn,
     FreshTransition,
     Deadline,
     Error,
@@ -393,6 +394,10 @@ impl<'a> TimerService<'a> {
                 already_idle.push(*process_id);
             }
         }
+        let owner_turn_end = owner_process_id
+            .map(|owner| self.registry.last_turn_end_at(owner))
+            .transpose()?
+            .flatten();
         let unseen_by_process = owner_process_id
             .map(|owner_process_id| {
                 CompletionLedger::new(self.registry.store())
@@ -408,14 +413,43 @@ impl<'a> TimerService<'a> {
         for process_id in &watch_process_ids {
             let idle = idle_by_process[process_id];
             let unseen = idle.then(|| unseen_by_process.get(process_id)).flatten();
-            let already_satisfied = kind == TimerKind::IdleAll && idle || unseen.is_some();
+            let ledger = CompletionLedger::new(self.registry.store());
+            let completed_this_turn = if kind == TimerKind::IdleAny
+                && idle
+                && let Some(turn_end) = owner_turn_end
+            {
+                ledger
+                    .latest_completion(*process_id)?
+                    .filter(|completion| completion.completed_at_ms > turn_end)
+            } else {
+                None
+            };
+            // A newer queued child prompt invalidates the completion, even during the
+            // attention grace period. Compare its input episode, not the owner's inputs.
+            let completed_this_turn = if let Some(completion) = completed_this_turn {
+                let input_at = self
+                    .registry
+                    .agent_attention_snapshot(*process_id)?
+                    .last_input_at;
+                (input_at == ledger.completion_input_at(completion.id)?
+                    && !self.registry.has_pending_prompts(*process_id))
+                .then_some(completion)
+            } else {
+                None
+            };
+            let completion = unseen.copied().or(completed_this_turn);
+            let already_satisfied = kind == TimerKind::IdleAll && idle || completion.is_some();
             let mut progress = WatchProgress::new(idle, already_satisfied);
-            if let Some(completion) = unseen {
+            if let Some(completion) = completion {
                 progress.completion_id = Some(completion.id);
                 satisfied_by.push(TimerSatisfaction {
                     process_id: Some(*process_id),
                     completed_at_ms: Some(completion.completed_at_ms),
-                    reason: TimerSatisfactionReason::UnseenCompletion,
+                    reason: if unseen.is_some() {
+                        TimerSatisfactionReason::UnseenCompletion
+                    } else {
+                        TimerSatisfactionReason::CompletedThisTurn
+                    },
                 });
             }
             watch_state.insert(*process_id, progress);
@@ -918,6 +952,7 @@ impl<'a> TimerService<'a> {
                             .rev()
                             .find_map(|satisfaction| match satisfaction.reason {
                                 TimerSatisfactionReason::UnseenCompletion
+                                | TimerSatisfactionReason::CompletedThisTurn
                                 | TimerSatisfactionReason::FreshTransition => {
                                     Some(satisfaction.reason)
                                 }
@@ -2595,6 +2630,23 @@ mod tests {
         assert!(registry.store().get_timer(cancelled_id).unwrap().is_none());
     }
 
+    // The delivery-only fixture echoes immediately and has no work evidence. Explicitly
+    // model its owner turn ending when testing rearming in a subsequent turn.
+    fn finish_delivery_owner_turn(registry: &ProcessRegistry) {
+        let now = now_millis();
+        CompletionLedger::new(registry.store())
+            .observe_process(
+                DELIVERY_ID,
+                AttentionState::Idle,
+                Some(now - 2),
+                Some(now - 1),
+                false,
+                now,
+            )
+            .unwrap()
+            .unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn idle_any_consumes_unseen_completion_once_then_waits_for_another_worker() {
@@ -2681,7 +2733,12 @@ mod tests {
                 now_millis(),
             )
             .unwrap();
-        assert!(matches!(old_behavior, IdleTimerOutcome::Created(_)));
+        // No owner turn has ended since spawn; this is also satisfied by the new rule.
+        assert!(matches!(
+            old_behavior,
+            IdleTimerOutcome::AlreadySatisfied { .. }
+        ));
+        finish_delivery_owner_turn(&registry);
 
         registry.send_input(SECOND_WORKER_ID, b"go\r").unwrap();
         CompletionLedger::new(registry.store())
@@ -2715,7 +2772,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        wait_for_state(&mut registry, SECOND_WORKER_ID, AttentionState::Waiting);
+        wait_for_state(&mut registry, SECOND_WORKER_ID, AttentionState::Idle);
         let fires = TimerService::new(&mut registry).tick(now_millis()).unwrap();
         let fire = fires
             .iter()
@@ -2883,6 +2940,7 @@ mod tests {
             1,
             "cosmetic idle repaints must not advance work evidence"
         );
+        finish_delivery_owner_turn(&registry);
         assert!(matches!(
             TimerService::new(&mut registry)
                 .set_idle(
@@ -2961,6 +3019,7 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
         assert_eq!(completion_count(&registry), 1);
+        finish_delivery_owner_turn(&registry);
         assert!(matches!(
             TimerService::new(&mut registry)
                 .set_idle(
